@@ -13,7 +13,7 @@ export const defaultHabits: SeedHabit[] = [
   // ── Home Mode ────────────────────────────────────────────
 
   {
-    name: 'No Porn',
+    name: 'No Explicit Content',
     icon: { ios: 'shield.checkmark.fill', android: 'shield', web: 'shield' },
     color: '#EF4444',
     mode: 'home',
@@ -104,7 +104,7 @@ export const defaultHabits: SeedHabit[] = [
   // ── Hostel Mode ──────────────────────────────────────────
 
   {
-    name: 'No Porn',
+    name: 'No Explicit Content',
     icon: { ios: 'shield.checkmark.fill', android: 'shield', web: 'shield' },
     color: '#EF4444',
     mode: 'hostel',

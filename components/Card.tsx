@@ -15,6 +15,20 @@ interface CardProps extends ViewProps {
   delay?: number;
 }
 
+function withAlpha(color: string, alpha: number): string {
+  // Accepts '#RRGGBB' or 'rgba(...)'. If not hex, return as-is.
+  if (!color.startsWith("#") || (color.length !== 7 && color.length !== 4)) return color;
+  const hex =
+    color.length === 4
+      ? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`
+      : color;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const a = Math.max(0, Math.min(1, alpha));
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
 export function Card({
   style,
   elevated,
@@ -33,7 +47,11 @@ export function Card({
 
   const cardStyle = [
     styles.base,
-    { backgroundColor: elevated ? t.cardElevated : t.card },
+    {
+      backgroundColor: elevated ? withAlpha(t.cardElevated, 0.82) : withAlpha(t.card, 0.72),
+      borderColor: withAlpha("#FFFFFF", 0.10),
+    },
+    styles.glass,
     elevated && styles.elevated,
     style,
   ];
@@ -93,6 +111,9 @@ const styles = StyleSheet.create({
         shadowRadius: 12,
       },
     }),
+  },
+  glass: {
+    borderWidth: 1,
   },
   elevated: {
     ...Platform.select({

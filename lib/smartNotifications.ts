@@ -78,7 +78,7 @@ export async function rescheduleSmartNotifications(): Promise<void> {
   if (Platform.OS === "android") {
     await Notifications.setNotificationChannelAsync("detox-default", {
       name: "Detox reminders",
-      importance: Notifications.AndroidImportance.DEFAULT,
+      importance: Notifications.AndroidImportance.HIGH,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: "#4ADE80",
     });

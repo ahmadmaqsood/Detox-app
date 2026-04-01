@@ -1,7 +1,7 @@
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import type { ComponentProps } from "react";
-import { Platform } from "react-native";
 import type { ColorValue } from "react-native";
+import { Platform } from "react-native";
 
 export type MaterialIconName = ComponentProps<typeof MaterialIcons>["name"];
 export type IonIconName = ComponentProps<typeof Ionicons>["name"];

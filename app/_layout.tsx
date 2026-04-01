@@ -7,6 +7,7 @@ import { useFonts } from "expo-font";
 import { Stack, useRouter, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
+import Constants from "expo-constants";
 import { useEffect, useMemo, useState } from "react";
 import { AppState } from "react-native";
 import "react-native-gesture-handler";
@@ -76,6 +77,21 @@ function RootLayoutNavInner() {
   const segments = useSegments();
   const { scheme } = useAppearance();
   const t = scheme === "light" ? colors.light : colors.dark;
+
+  // Silence Expo Go-only push warning from expo-notifications (remote push not supported in Go).
+  if (__DEV__ && Constants.appOwnership === "expo") {
+    const origError = console.error;
+    console.error = (...args: any[]) => {
+      const first = args[0];
+      if (
+        typeof first === "string" &&
+        first.includes("expo-notifications: Android Push notifications (remote notifications)")
+      ) {
+        return;
+      }
+      return origError(...args);
+    };
+  }
 
   const navigationTheme = useMemo(() => {
     const base = scheme === "light" ? DefaultTheme : DarkTheme;

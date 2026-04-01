@@ -270,6 +270,12 @@ async function migrateSchema(d: SQLite.SQLiteDatabase): Promise<void> {
     );
   }
 
+  // Rename to a simpler, less "cheap-looking" label.
+  // Existing entries are keyed by habitId, so this only updates the displayed name.
+  await d.execAsync(
+    `UPDATE habits SET name = 'No Explicit Content' WHERE name = 'No Porn';`,
+  );
+
   const metricsCols = await d.getAllAsync<{ name: string }>(
     "PRAGMA table_info(metrics)",
   );
@@ -1759,6 +1765,16 @@ export async function getTodayInterventions(): Promise<Intervention[]> {
   );
 }
 
+/** True if an intervention with this exact `action` has already been stored for today. */
+export async function hasTodayInterventionAction(action: string): Promise<boolean> {
+  const d = await getDB();
+  const row = await d.getFirstAsync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM interventions WHERE date = ? AND action = ?`,
+    [todayISO(), action],
+  );
+  return (row?.n ?? 0) > 0;
+}
+
 // ─── Helpers: Onboarding ─────────────────────────────────────
 
 export async function isOnboardingComplete(): Promise<boolean> {
@@ -1779,6 +1795,8 @@ export async function setOnboardingComplete(): Promise<void> {
 // ─── Helpers: Detox Mode ──────────────────────────────────────
 
 const ESSENTIAL_HABITS = new Set([
+  "No Explicit Content",
+  // Backward compatibility for existing installs.
   "No Porn",
   "Namaz",
   "Quran Reading",

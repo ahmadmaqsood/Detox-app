@@ -539,7 +539,8 @@ function ScreenTimeInput({
   const label = mins > 0
     ? `${hours > 0 ? `${hours}h ` : ''}${remMins}m today`
     : 'Not logged yet';
-  const isHigh = mins > 150;
+  // Match your “high risk” tier (> 3 hours).
+  const isHigh = mins > 180;
 
   return (
     <View style={[styles.stCard, { backgroundColor: t.card }]}>

@@ -116,6 +116,7 @@ export default function SettingsScreen() {
                   />
                 </Pressable>
               )}
+
               {section.rows.map((row, ri) => (
                 <Pressable
                   key={row.label}

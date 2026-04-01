@@ -1,14 +1,49 @@
-import type { UserContext } from './contextBuilder';
+import type { UserContext } from "./contextBuilder";
 
 // ─── Personality: Direct. No excuses. Action-oriented. ────────
 
-const URGE_WORDS = ['urge', 'tempt', 'craving', 'want to watch', 'feeling weak', 'can\'t resist'];
-const RELAPSE_WORDS = ['relapse', 'relapsed', 'failed', 'fell', 'gave in', 'messed up', 'slipped'];
-const MOTIVATION_WORDS = ['motivat', 'tired', 'lazy', 'don\'t feel like', 'no energy', 'why bother', 'give up'];
-const DISTRACTION_WORDS = ['distract', 'focus', 'can\'t concentrate', 'scrolling', 'wasting time', 'procrastinat'];
-const SCREEN_WORDS = ['screen time', 'phone', 'too much screen', 'addicted to phone'];
-const STREAK_WORDS = ['streak', 'how many days', 'my progress'];
-const GREETING_WORDS = ['hi', 'hello', 'hey', 'salam', 'assalam'];
+const URGE_WORDS = [
+  "urge",
+  "tempt",
+  "craving",
+  "want to watch",
+  "feeling weak",
+  "can't resist",
+];
+const RELAPSE_WORDS = [
+  "relapse",
+  "relapsed",
+  "failed",
+  "fell",
+  "gave in",
+  "messed up",
+  "slipped",
+];
+const MOTIVATION_WORDS = [
+  "motivat",
+  "tired",
+  "lazy",
+  "don't feel like",
+  "no energy",
+  "why bother",
+  "give up",
+];
+const DISTRACTION_WORDS = [
+  "distract",
+  "focus",
+  "can't concentrate",
+  "scrolling",
+  "wasting time",
+  "procrastinat",
+];
+const SCREEN_WORDS = [
+  "screen time",
+  "phone",
+  "too much screen",
+  "addicted to phone",
+];
+const STREAK_WORDS = ["streak", "how many days", "my progress"];
+const GREETING_WORDS = ["hi", "hello", "hey", "salam", "assalam"];
 
 function matches(msg: string, words: string[]): boolean {
   const lower = msg.toLowerCase();
@@ -44,9 +79,9 @@ const MOTIVATION_RESPONSES = [
 ];
 
 const MOTIVATION_ADVANCED = [
-  'Discipline = identity. Move.',
-  'No debate. Next action now.',
-  'You know the drill. Execute.',
+  "Discipline = identity. Move.",
+  "No debate. Next action now.",
+  "You know the drill. Execute.",
 ];
 
 const DISTRACTION_RESPONSES = [
@@ -63,9 +98,9 @@ const GREETING_RESPONSES = [
   "Talk to me. What's going on?",
 ];
 
-function nightCompletionThreshold(level: UserContext['level']): number {
-  if (level === 'beginner') return 55;
-  if (level === 'intermediate') return 50;
+function nightCompletionThreshold(level: UserContext["level"]): number {
+  if (level === "beginner") return 55;
+  if (level === "intermediate") return 50;
   return 45;
 }
 
@@ -97,14 +132,18 @@ function getContextResponse(ctx: UserContext): string | null {
     ]);
   }
 
-  if (ctx.timeOfDay === 'night' && ctx.completionRate < nightCompletionThreshold(ctx.level)) {
+  if (
+    ctx.timeOfDay === "night" &&
+    ctx.completionRate < nightCompletionThreshold(ctx.level)
+  ) {
     return pick([
       "It's late and completion is low. Finish what you can. Then sleep.",
       "Night window. Low completion. One more habit, then rest.",
     ]);
   }
 
-  const goodBar = ctx.level === 'advanced' ? 75 : ctx.level === 'intermediate' ? 78 : 80;
+  const goodBar =
+    ctx.level === "advanced" ? 75 : ctx.level === "intermediate" ? 78 : 80;
   if (ctx.completionRate >= goodBar) {
     return pick([
       `${ctx.completionRate}% done today. Solid. Close it out.`,
@@ -116,30 +155,33 @@ function getContextResponse(ctx: UserContext): string | null {
   return null;
 }
 
-export function generateResponse(message: string, context: UserContext): string {
+export function generateResponse(
+  message: string,
+  context: UserContext,
+): string {
   if (matches(message, URGE_WORDS)) {
     const r = pick(URGE_RESPONSES);
-    if (context.level === 'beginner')
+    if (context.level === "beginner")
       return `${r} One small win now beats a perfect plan later.`;
     return r;
   }
   if (matches(message, RELAPSE_WORDS)) {
     const r = pick(RELAPSE_RESPONSES);
-    if (context.relapseTrend === 'improving' && context.level !== 'beginner')
+    if (context.relapseTrend === "improving" && context.level !== "beginner")
       return `${r} Trend is improving — don't waste it on shame.`;
     return r;
   }
   if (matches(message, MOTIVATION_WORDS)) {
-    if (context.level === 'advanced') return pick(MOTIVATION_ADVANCED);
-    if (context.level === 'beginner')
+    if (context.level === "advanced") return pick(MOTIVATION_ADVANCED);
+    if (context.level === "beginner")
       return `Start tiny: check one habit. ${pick(MOTIVATION_RESPONSES)}`;
     return pick(MOTIVATION_RESPONSES);
   }
   if (matches(message, DISTRACTION_WORDS)) {
-    if (context.level === 'advanced') {
+    if (context.level === "advanced") {
       return pick([
-        'Timer. One task. Go.',
-        'Eliminate inputs. Work 15m.',
+        "Timer. One task. Go.",
+        "Eliminate inputs. Work 15m.",
         ...DISTRACTION_RESPONSES,
       ]);
     }
@@ -158,7 +200,7 @@ export function generateResponse(message: string, context: UserContext): string 
   if (matches(message, STREAK_WORDS)) {
     if (context.streak === 0)
       return "Streak is at 0. Start building it today. One day at a time.";
-    if (context.level === 'advanced' && context.streak >= 14)
+    if (context.level === "advanced" && context.streak >= 14)
       return `${context.streak} days. Stay ruthless. No complacency.`;
     if (context.streak < 7)
       return `${context.streak} days. Fragile. Protect it this week.`;
@@ -167,7 +209,9 @@ export function generateResponse(message: string, context: UserContext): string 
 
   if (matches(message, GREETING_WORDS)) {
     const ctx = getContextResponse(context);
-    return ctx ? `${pick(GREETING_RESPONSES)} ${ctx}` : pick(GREETING_RESPONSES);
+    return ctx
+      ? `${pick(GREETING_RESPONSES)} ${ctx}`
+      : pick(GREETING_RESPONSES);
   }
 
   const contextResp = getContextResponse(context);
@@ -181,10 +225,12 @@ export function generateResponse(message: string, context: UserContext): string 
     "Action beats thinking. Pick one habit and do it right now.",
     "Focus on what you can control. What's the next right thing to do?",
   ];
-  if (context.level === 'beginner')
-    defaults.push('Pick the easiest habit on your list. Check it. Momentum beats planning.');
-  if (context.level === 'advanced')
-    defaults.push('You know what to do. Do it without negotiating.');
+  if (context.level === "beginner")
+    defaults.push(
+      "Pick the easiest habit on your list. Check it. Momentum beats planning.",
+    );
+  if (context.level === "advanced")
+    defaults.push("You know what to do. Do it without negotiating.");
 
   return pick(defaults);
 }
