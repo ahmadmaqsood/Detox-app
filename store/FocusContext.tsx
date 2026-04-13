@@ -8,12 +8,13 @@ import {
   type ReactNode,
 } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
+import { getCurrentFirebaseUser, subscribeAuth } from "@/lib/firebase";
 import {
   getFocusLockEnabled,
   setFocusLockEnabled as persistFocus,
   recordAppOpenEvent,
   getAppOpenCountSince,
-} from '@/lib/database';
+} from "@/lib/firestoreDatabase";
 
 const FOCUS_WINDOW_MS = 45 * 60 * 1000;
 const OPEN_BURST_THRESHOLD = 6;
@@ -41,6 +42,10 @@ export function FocusProvider({ children }: { children: ReactNode }) {
   const warnedAt = useRef(0);
 
   const checkBurst = useCallback(async () => {
+    if (!getCurrentFirebaseUser()) {
+      setFrequentOpenWarning(false);
+      return;
+    }
     if (!(await getFocusLockEnabled())) {
       setFrequentOpenWarning(false);
       return;
@@ -57,14 +62,28 @@ export function FocusProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshFocusState = useCallback(async () => {
-    const on = await getFocusLockEnabled();
-    setFocusLockState(on);
-    if (!on) setFrequentOpenWarning(false);
+    if (!getCurrentFirebaseUser()) {
+      setFocusLockState(false);
+      setFrequentOpenWarning(false);
+      return;
+    }
+    try {
+      const on = await getFocusLockEnabled();
+      setFocusLockState(on);
+      if (!on) setFrequentOpenWarning(false);
+    } catch {
+      setFocusLockState(false);
+      setFrequentOpenWarning(false);
+    }
   }, []);
 
   const setFocusLock = useCallback(async (v: boolean) => {
     setFocusLockState(v);
-    await persistFocus(v);
+    try {
+      await persistFocus(v);
+    } catch {
+      /* not signed in */
+    }
   }, []);
 
   const dismissWarning = useCallback(() => {
@@ -72,7 +91,9 @@ export function FocusProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    refreshFocusState();
+    return subscribeAuth(() => {
+      void refreshFocusState();
+    });
   }, [refreshFocusState]);
 
   useEffect(() => {
@@ -80,9 +101,14 @@ export function FocusProvider({ children }: { children: ReactNode }) {
       const wasBg = /inactive|background/.test(appState.current ?? '');
       appState.current = next;
       if (wasBg && next === 'active') {
-        if (await getFocusLockEnabled()) {
-          await recordAppOpenEvent();
-          await checkBurst(); 
+        if (!getCurrentFirebaseUser()) return;
+        try {
+          if (await getFocusLockEnabled()) {
+            await recordAppOpenEvent();
+            await checkBurst();
+          }
+        } catch {
+          /* not signed in */
         }
       }
     });

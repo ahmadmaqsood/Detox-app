@@ -56,6 +56,11 @@ const DRAWER_ITEMS: DrawerItem[] = [
     icon: { ios: "trophy.fill", material: "trophy" },
   },
   {
+    label: "Achievements",
+    route: "/(drawer)/achievements",
+    icon: { ios: "star.circle.fill", material: "trophy-award" },
+  },
+  {
     label: "Spiritual",
     route: "/(drawer)/spiritualChallenges",
     icon: { ios: "hands.sparkles.fill", material: "hands-pray" },
@@ -69,11 +74,6 @@ const DRAWER_ITEMS: DrawerItem[] = [
     label: "Diet",
     route: "/(drawer)/diet",
     icon: { ios: "leaf.fill", material: "leaf" },
-  },
-  {
-    label: "Detox Mode",
-    route: "/(drawer)/(tabs)/today",
-    icon: { ios: "shield.checkmark.fill", material: "shield-check" },
   },
   {
     label: "Profile",

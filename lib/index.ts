@@ -20,6 +20,10 @@ export {
   getRiskLabel,
   type RiskInput, type RiskLevel, type RiskResult
 } from "./riskEngine";
-export { defaultHabits, type SeedHabit } from "./seed";
+export {
+  defaultHabits,
+  homeRoutineHabitsV3,
+  type SeedHabit,
+} from "./seed";
 export * from "./types";
 

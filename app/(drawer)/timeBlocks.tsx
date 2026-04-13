@@ -1,3 +1,7 @@
+import { PlatformSymbol } from '@/components/PlatformSymbol';
+import { type DrawerNavigationProp } from '@react-navigation/drawer';
+import * as Haptics from 'expo-haptics';
+import { useFocusEffect, useNavigation } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   Modal,
@@ -8,25 +12,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useFocusEffect, useNavigation } from 'expo-router';
-import { type DrawerNavigationProp } from '@react-navigation/drawer';
-import { PlatformSymbol } from '@/components/PlatformSymbol';
-import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { Body, Caption, Heading } from '@/components/Typography';
 import {
+  addTimeBlock,
+  deleteTimeBlock,
   getTimeBlockLog,
   getTimeBlocks,
   setTimeBlockLog,
-  addTimeBlock,
-  deleteTimeBlock,
 } from '@/lib/database';
 import type { TimeBlock, TimeBlockCategory } from '@/lib/types';
 import { useAppTheme } from '@/theme';
-import { spacing, radius } from '@/theme/spacing';
+import { radius, spacing } from '@/theme/spacing';
 
 const CATEGORY_LABEL: Record<TimeBlockCategory, string> = {
   morning_routine: 'Morning routine',
@@ -188,7 +188,7 @@ export default function TimeBlocksScreen() {
               style={[styles.miniIn, { color: t.textPrimary, borderColor: t.border, backgroundColor: t.background }]}
               value={label}
               onChangeText={setLabel}
-              placeholder="e.g. Deep work"
+              placeholder="e.g. Office work"
               placeholderTextColor={t.textMuted}
             />
             <View style={styles.row2}>

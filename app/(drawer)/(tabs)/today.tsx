@@ -6,38 +6,20 @@ import {
 } from "@/components/PlatformSymbol";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Body, Caption, Heading } from "@/components/Typography";
+import { getCurrentFirebaseUser } from "@/lib/firebase";
 import {
   addIntervention,
   completeIntervention,
+  endUrgeToolSession,
   getEssentialHabitsToday,
-  getExerciseMinutesForDate,
-  getMetrics,
-  getStreak,
+  getModeStreak,
   getTodayHabits,
-  isEssentialHabit,
-  saveMetrics,
+  recordUrgeToolActionCompletion,
+  startUrgeToolSession,
   toggleHabit,
-} from "@/lib/database";
-import {
-  evaluateDangerZone,
-  movementHeuristic,
-  type DangerZoneResult,
-} from "@/lib/lifeOS";
-import {
-  formatUserLevelLabel,
-  getLevelBlurb,
-  loadUserLevelState,
-  type UserLevelState,
-} from "@/lib/userLevel";
-import {
-  calculateRisk,
-  getInterventionMessage,
-  getRiskColor,
-  getRiskLabel,
-  type RiskResult,
-} from "@/lib/riskEngine";
-import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
+} from "@/lib/firestoreDatabase";
 import { parseHabitIcon, type Habit, type Mode } from "@/lib/types";
+import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import { useAppearance } from "@/store/AppearanceContext";
 import { useDetox } from "@/store/DetoxContext";
 import { useFocusLock } from "@/store/FocusContext";
@@ -45,11 +27,11 @@ import { useHardMode } from "@/store/HardModeContext";
 import { useMode } from "@/store/ModeContext";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
-import * as Haptics from "expo-haptics";
-import { useFocusEffect, useRouter, useNavigation } from "expo-router";
-import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type DrawerNavigationProp } from "@react-navigation/drawer";
+import * as Haptics from "expo-haptics";
+import { useFocusEffect, useNavigation, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from "react-native";
 import Animated, {
   Easing,
@@ -72,10 +54,6 @@ const modeSegments: { label: string; value: Mode }[] = [
 
 type HabitRow = Habit & { completed: number };
 
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export default function TodayScreen() {
   const t = useAppTheme();
   const router = useRouter();
@@ -86,79 +64,57 @@ export default function TodayScreen() {
   const { hardMode } = useHardMode();
   const { focusLock, frequentOpenWarning, dismissWarning } = useFocusLock();
   const [habits, setHabits] = useState<HabitRow[]>([]);
-  const [dangerZone, setDangerZone] = useState<DangerZoneResult | null>(null);
-  const [screenTime, setScreenTime] = useState('');
-  const [risk, setRisk] = useState<RiskResult>({
-    score: 0,
-    level: "safe",
-    factors: [],
-  });
-  const [levelState, setLevelState] = useState<UserLevelState | null>(null);
+  const [homeStreak, setHomeStreak] = useState(0);
+  const [hostelStreak, setHostelStreak] = useState(0);
+  const [urgeToolsOn, setUrgeToolsOn] = useState(false);
+  const [urgeSessionId, setUrgeSessionId] = useState<number | null>(null);
+  const urgeSessionRef = useRef<number | null>(null);
   const scrollRef = useScrollToTopOnTabFocus();
 
-  const loadHabits = useCallback(async () => {
-    const lvl = await loadUserLevelState();
-    setLevelState(lvl);
+  const handleUrgeToolsChange = useCallback(async (next: boolean) => {
+    if (next) {
+      try {
+        const id = await startUrgeToolSession();
+        urgeSessionRef.current = id;
+        setUrgeSessionId(id);
+        setUrgeToolsOn(true);
+      } catch {
+        Alert.alert("Couldn’t start", "Recovery session didn’t save. Try again.");
+      }
+      return;
+    }
+    const sid = urgeSessionRef.current;
+    urgeSessionRef.current = null;
+    setUrgeSessionId(null);
+    setUrgeToolsOn(false);
+    if (sid != null) {
+      await endUrgeToolSession(sid);
+    }
+  }, []);
 
+  const loadHabits = useCallback(async () => {
+    if (!getCurrentFirebaseUser()) {
+      setHabits([]);
+      setHomeStreak(0);
+      setHostelStreak(0);
+      return;
+    }
     const rows = detox
       ? await getEssentialHabitsToday(mode)
       : await getTodayHabits(mode);
     setHabits(rows);
 
+    const [hs, hos] = await Promise.all([
+      getModeStreak("home"),
+      getModeStreak("hostel"),
+    ]);
+    setHomeStreak(hs);
+    setHostelStreak(hos);
+
     if (detox) {
       await refreshStreak();
-      const metricsD = await getMetrics();
-      const exD = await getExerciseMinutesForDate(todayISO());
-      const doneD = rows.filter((r) => r.completed).length;
-      const rateD = rows.length ? doneD / rows.length : 1;
-      setDangerZone(
-        evaluateDangerZone({
-          screenTimeMinutes: metricsD?.screenTime ?? 0,
-          habitCompletionRate: rateD,
-          movementScore: movementHeuristic({
-            steps: metricsD?.steps ?? 0,
-            exerciseMinutes: exD,
-          }),
-        }),
-      );
-      return;
     }
-
-    const metrics = await getMetrics();
-    const savedST = metrics?.screenTime ?? 0;
-    setScreenTime(savedST > 0 ? String(savedST) : '');
-    const screenTimeVal = savedST;
-
-    let bestStreak = 0;
-    for (const h of rows) {
-      const s = await getStreak(h.id);
-      if (s > bestStreak) bestStreak = s;
-    }
-
-    const completedRows = rows.filter((r) => r.completed);
-    const result = calculateRisk({
-      screenTime: screenTimeVal,
-      completedHabits: completedRows,
-      totalHabits: rows,
-      mode,
-      streak: bestStreak,
-      hardMode,
-    });
-    setRisk(result);
-
-    const exMin = await getExerciseMinutesForDate(todayISO());
-    const rate = rows.length ? completedRows.length / rows.length : 1;
-    setDangerZone(
-      evaluateDangerZone({
-        screenTimeMinutes: screenTimeVal,
-        habitCompletionRate: rate,
-        movementScore: movementHeuristic({
-          steps: metrics?.steps ?? 0,
-          exerciseMinutes: exMin,
-        }),
-      }),
-    );
-  }, [mode, detox, hardMode]);
+  }, [mode, detox, refreshStreak]);
 
   useFocusEffect(
     useCallback(() => {
@@ -189,26 +145,15 @@ export default function TodayScreen() {
     await setDetox(value);
   };
 
-  const handleScreenTimeSave = useCallback(async (text: string) => {
-    const mins = parseInt(text, 10);
-    if (isNaN(mins) || mins < 0) return;
-    await saveMetrics({ screenTime: mins, riskScore: risk.score, relapse: 0 });
-    await loadHabits();
-  }, [risk.score, loadHabits]);
-
   const completed = habits.filter((h) => h.completed).length;
   const pending = habits.length - completed;
   const progress = habits.length > 0 ? completed / habits.length : 0;
 
-  const riskColor = getRiskColor(risk.level);
-  const riskLabel = getRiskLabel(risk.level);
-  const riskAlertThreshold = levelState?.riskAlertThreshold ?? 70;
-  const showAlert = risk.score > riskAlertThreshold;
-
-  const intervention = useMemo(
-    () =>
-      showAlert ? getInterventionMessage("danger", { hardMode }) : null,
-    [showAlert, hardMode],
+  /** Home Control Center: show routine as an ordered list; checking a tile hides it until tomorrow. */
+  const homeOrderActive = mode === "home" && !detox;
+  const visibleHabits = useMemo(
+    () => (homeOrderActive ? habits.filter((h) => !h.completed) : habits),
+    [homeOrderActive, habits],
   );
 
   // ─── Detox Mode UI ──────────────────────────────────
@@ -270,7 +215,28 @@ export default function TodayScreen() {
           />
         )}
 
-        <DangerZoneStrip danger={dangerZone} t={t} router={router} />
+        {/* <DangerZoneStrip danger={dangerZone} t={t} router={router} /> */}
+
+        <ModeDualStreakStrip
+          home={homeStreak}
+          hostel={hostelStreak}
+          active={mode}
+          t={t}
+        />
+
+        <UrgeToolsBar
+          value={urgeToolsOn}
+          onValueChange={handleUrgeToolsChange}
+          t={t}
+        />
+        <UrgeRecoveryPanel
+          key={urgeSessionId ?? "off"}
+          visible={urgeToolsOn}
+          sessionId={urgeSessionId}
+          onLogged={loadHabits}
+          onAllComplete={() => handleUrgeToolsChange(false)}
+          t={t}
+        />
 
         {/* Detox Streak */}
         <Animated.View entering={FadeIn.duration(400)}>
@@ -414,7 +380,7 @@ export default function TodayScreen() {
         />
       )}
 
-      <DangerZoneStrip danger={dangerZone} t={t} router={router} />
+      {/* <DangerZoneStrip danger={dangerZone} t={t} router={router} /> */}
 
       {/* ─── Mode Toggle ────────────────────────────── */}
       <SegmentedControl
@@ -423,32 +389,88 @@ export default function TodayScreen() {
         onChange={setMode}
       />
 
-      {/* ─── Screen Time Input ─────────────────────── */}
-      <ScreenTimeInput
+      <ModeDualStreakStrip
+        home={homeStreak}
+        hostel={hostelStreak}
+        active={mode}
+        t={t}
+      />
+
+      <UrgeToolsBar
+        value={urgeToolsOn}
+        onValueChange={handleUrgeToolsChange}
+        t={t}
+      />
+      <UrgeRecoveryPanel
+        key={urgeSessionId ?? "off"}
+        visible={urgeToolsOn}
+        sessionId={urgeSessionId}
+        onLogged={loadHabits}
+        onAllComplete={() => handleUrgeToolsChange(false)}
+        t={t}
+      />
+
+      {homeOrderActive && (
+        <Pressable
+          onPress={() =>
+            Alert.alert(
+              "Move at home",
+              "More movement at home keeps you safer: it cuts idle scrolling and negative dopamine loops. Stretch, walk a room, or do light chores before you reach for the phone.",
+            )
+          }
+          style={({ pressed }) => [
+            styles.homeSafetyBanner,
+            { backgroundColor: t.accent + "14", borderColor: t.accent + "44" },
+            pressed && { opacity: 0.9 },
+          ]}
+        >
+          <PlatformSymbol
+            ios="figure.walk.motion"
+            material="directions-walk"
+            tintColor={t.accent}
+            size={20}
+          />
+          <View style={{ flex: 1, marginLeft: spacing.sm }}>
+            <Body variant="bodyMedium" color={t.textPrimary}>
+              At home: move more, scroll less
+            </Body>
+            <Caption variant="caption2" color={t.textMuted}>
+              Tap for a reminder on dopamine and safety at home.
+            </Caption>
+          </View>
+          <PlatformSymbol
+            ios="chevron.right"
+            material="chevron-right"
+            tintColor={t.textMuted}
+            size={16}
+          />
+        </Pressable>
+      )}
+
+      {/* ─── Screen Time + risk (hidden for now; keep components below) ─ */}
+      {/* <ScreenTimeInput
         value={screenTime}
         onChange={setScreenTime}
         onSave={handleScreenTimeSave}
         t={t}
-      />
+      /> */}
 
-      {/* ─── Risk Meter ──────────────────────────────── */}
-      <RiskMeter
+      {/* <RiskMeter
         score={risk.score}
         level={risk.level}
         color={riskColor}
         label={riskLabel}
-      />
-      {levelState && (
+      /> */}
+      {/* {levelState && (
         <Caption variant="caption2" color={t.textMuted} style={styles.levelHint}>
-          {formatUserLevelLabel(levelState.level)} · {getLevelBlurb(levelState.level)} Alert if
-          risk {">"} {riskAlertThreshold}.
+          ...
         </Caption>
-      )}
+      )} */}
 
-      {/* ─── Danger Alert ────────────────────────────── */}
+      {/* Risk-climb intervention (temporarily off)
       {showAlert && intervention && (
         <AlertCard intervention={intervention} onActionComplete={loadHabits} />
-      )}
+      )} */}
 
       {/* ─── Overall Progress ────────────────────────── */}
       <Card style={styles.progressCard}>
@@ -493,27 +515,36 @@ export default function TodayScreen() {
         <View style={styles.habitList}>
           <View style={styles.sectionHeader}>
             <Body variant="headline" color={t.textSecondary}>
-              Habits
+              {homeOrderActive ? "Today's order" : "Habits"}
             </Body>
             <Caption variant="caption2" color={t.textMuted}>
               {completed}/{habits.length}
+              {homeOrderActive ? " · rest hide until tomorrow" : ""}
             </Caption>
           </View>
 
-          {habits.map((habit, index) => (
-            <HabitCard
-              key={habit.id}
-              habit={habit}
-              index={index}
-              onToggle={handleToggle}
-              onPress={() =>
-                router.push({
-                  pathname: "/habitDetail",
-                  params: { id: String(habit.id) },
-                })
-              }
-            />
-          ))}
+          {homeOrderActive && visibleHabits.length === 0 && completed > 0 ? (
+            <Card animated style={styles.emptyCard}>
+              <Body variant="callout" color={t.textSecondary} style={styles.emptyText}>
+                All steps done for today. Streaks stay in sync — tomorrow the full order returns.
+              </Body>
+            </Card>
+          ) : (
+            visibleHabits.map((habit, index) => (
+              <HabitCard
+                key={habit.id}
+                habit={habit}
+                index={index}
+                onToggle={handleToggle}
+                onPress={() =>
+                  router.push({
+                    pathname: "/habitDetail",
+                    params: { id: String(habit.id) },
+                  })
+                }
+              />
+            ))
+          )}
         </View>
       )}
     </ScrollView>
@@ -587,7 +618,7 @@ function ScreenTimeInput({
   );
 }
 
-function DangerZoneStrip({
+/* function DangerZoneStrip({
   danger,
   t,
   router,
@@ -637,7 +668,7 @@ function DangerZoneStrip({
       </Pressable>
     </Animated.View>
   );
-}
+} */
 
 function FocusLockBanner({
   t,
@@ -890,26 +921,26 @@ function RiskMeter({
 const RECOVERY_ACTIONS = [
   {
     label: 'Walk 10 minutes',
-    icon: { ios: 'figure.walk', android: 'directions_walk', web: 'directions_walk' },
-    material: 'walk' as MaterialIconName,
+    icon: { ios: 'figure.walk', android: 'directions-walk', web: 'directions-walk' },
+    material: 'directions-walk' as MaterialIconName,
     color: '#34D399',
   },
   {
     label: 'Do pushups',
     icon: { ios: 'figure.strengthtraining.traditional', android: 'fitness_center', web: 'fitness_center' },
-    material: 'dumbbell',
+    material: 'fitness-center',
     color: '#22D3EE',
   },
   {
     label: 'Cold shower',
-    icon: { ios: 'drop.fill', android: 'water_drop', web: 'water_drop' },
-    material: 'water',
+    icon: { ios: 'drop.fill', android: 'water-drop', web: 'water-drop' },
+    material: 'water-drop',
     color: '#60A5FA',
   },
   {
     label: 'Read Quran',
-    icon: { ios: 'book.fill', android: 'menu_book', web: 'menu_book' },
-    material: 'book-open-variant',
+    icon: { ios: 'book.fill', android: 'menu-book', web: 'menu-book' },
+    material: 'menu-book',
     color: '#4ADE80',
   },
   {
@@ -919,6 +950,200 @@ const RECOVERY_ACTIONS = [
     color: '#A78BFA',
   },
 ] as const;
+
+// ─── Mode streaks (Home vs Hostel) ──────────────────────────────
+
+function ModeDualStreakStrip({
+  home,
+  hostel,
+  active,
+  t,
+}: {
+  home: number;
+  hostel: number;
+  active: Mode;
+  t: ReturnType<typeof useAppTheme>;
+}) {
+  return (
+    <View style={styles.modeStreakRow}>
+      <View
+        style={[
+          styles.modeStreakCard,
+          {
+            backgroundColor: t.card,
+            borderColor: active === "home" ? t.accent : t.border,
+          },
+          active === "home" && styles.modeStreakCardActive,
+        ]}
+      >
+        <Caption variant="caption2" color={t.textMuted}>
+          Home
+        </Caption>
+        <Heading variant="largeTitle" color={t.accent} style={styles.modeStreakNum}>
+          {home}
+        </Heading>
+        <Caption variant="caption2" color={t.textSecondary}>
+          {home === 1 ? "strong day" : "strong days"} in a row
+        </Caption>
+      </View>
+      <View
+        style={[
+          styles.modeStreakCard,
+          {
+            backgroundColor: t.card,
+            borderColor: active === "hostel" ? t.accent : t.border,
+          },
+          active === "hostel" && styles.modeStreakCardActive,
+        ]}
+      >
+        <Caption variant="caption2" color={t.textMuted}>
+          Hostel
+        </Caption>
+        <Heading variant="largeTitle" color={t.accent} style={styles.modeStreakNum}>
+          {hostel}
+        </Heading>
+        <Caption variant="caption2" color={t.textSecondary}>
+          {hostel === 1 ? "strong day" : "strong days"} in a row
+        </Caption>
+      </View>
+    </View>
+  );
+}
+
+function UrgeToolsBar({
+  value,
+  onValueChange,
+  t,
+}: {
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+  t: ReturnType<typeof useAppTheme>;
+}) {
+  return (
+    <View
+      style={[
+        styles.urgeBar,
+        { backgroundColor: t.card, borderColor: t.border },
+      ]}
+    >
+      <View style={{ flex: 1 }}>
+        <Body variant="bodyMedium" color={t.textPrimary}>
+          Urge
+        </Body>
+        <Caption variant="caption2" color={t.textMuted}>
+          {value
+            ? "Recovery plan active — completions are saved with date & time"
+            : "Turn on to show recovery actions and log your urge session"}
+        </Caption>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={(v) => {
+          Haptics.selectionAsync();
+          onValueChange(v);
+        }}
+        trackColor={{ false: t.border, true: t.accent + "99" }}
+        thumbColor={t.background}
+      />
+    </View>
+  );
+}
+
+function UrgeRecoveryPanel({
+  visible,
+  sessionId,
+  onLogged,
+  onAllComplete,
+  t,
+}: {
+  visible: boolean;
+  sessionId: number | null;
+  onLogged: () => void;
+  onAllComplete: () => void;
+  t: ReturnType<typeof useAppTheme>;
+}) {
+  const [completedActions, setCompletedActions] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setCompletedActions(new Set());
+  }, [sessionId]);
+
+  if (!visible || sessionId == null) return null;
+
+  const handlePickAction = async (label: string) => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const interventionId = await addIntervention(label);
+    await completeIntervention(interventionId);
+    await recordUrgeToolActionCompletion(sessionId, label);
+    let nextSize = 0;
+    setCompletedActions((prev) => {
+      const next = new Set(prev).add(label);
+      nextSize = next.size;
+      return next;
+    });
+    onLogged();
+    if (nextSize >= RECOVERY_ACTIONS.length) {
+      Alert.alert(
+        "Proud of you",
+        "Congratulations — you completed the full recovery plan. That urge is done. Stay strong.",
+        [{ text: "Alhamdulillah", onPress: onAllComplete }],
+      );
+    }
+  };
+
+  return (
+    <Animated.View entering={FadeInDown.duration(280)} style={styles.urgePanel}>
+      <Body variant="headline" color={t.textPrimary} style={{ marginBottom: spacing.sm }}>
+        Pick a recovery action
+      </Body>
+      <View style={styles.actionList}>
+        {RECOVERY_ACTIONS.map((action, i) => {
+          const done = completedActions.has(action.label);
+          return (
+            <Animated.View
+              key={action.label}
+              entering={FadeInDown.delay(i * 40).springify().damping(18)}
+            >
+              <Pressable
+                style={[
+                  styles.actionRow,
+                  { backgroundColor: done ? action.color + "18" : t.cardElevated },
+                  done && { borderColor: action.color, borderWidth: 1 },
+                ]}
+                onPress={() => !done && handlePickAction(action.label)}
+                disabled={done}
+              >
+                <View style={[styles.actionIcon, { backgroundColor: action.color + "22" }]}>
+                  <PlatformSymbol
+                    ios={action.icon.ios}
+                    material={action.material}
+                    tintColor={action.color}
+                    size={18}
+                  />
+                </View>
+                <Body variant="bodyMedium" style={{ flex: 1, opacity: done ? 0.55 : 1 }}>
+                  {action.label}
+                </Body>
+                {done ? (
+                  <View style={[styles.actionCheck, { backgroundColor: action.color }]}>
+                    <PlatformSymbol ios="checkmark" material="check" tintColor="#fff" size={12} />
+                  </View>
+                ) : (
+                  <PlatformSymbol
+                    ios="chevron.right"
+                    material="chevron-right"
+                    tintColor={t.textMuted}
+                    size={14}
+                  />
+                )}
+              </Pressable>
+            </Animated.View>
+          );
+        })}
+      </View>
+    </Animated.View>
+  );
+}
 
 // ─── Alert Card ────────────────────────────────────────────────
 
@@ -1279,6 +1504,49 @@ const styles = StyleSheet.create({
   scroll: {
     paddingHorizontal: spacing.xl,
     gap: spacing.lg,
+  },
+  homeSafetyBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.xs,
+  },
+  modeStreakRow: {
+    flexDirection: "row",
+    gap: spacing.md,
+    width: "100%",
+  },
+  modeStreakCard: {
+    flex: 1,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    alignItems: "center",
+    gap: spacing.xxs,
+  },
+  modeStreakCardActive: {
+    borderWidth: 2,
+  },
+  modeStreakNum: {
+    marginVertical: spacing.xxs,
+  },
+  urgeBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.md,
+  },
+  urgePanel: {
+    width: "100%",
+    gap: spacing.sm,
   },
 
   // Header

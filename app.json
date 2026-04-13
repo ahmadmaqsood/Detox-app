@@ -63,6 +63,17 @@
           "Cross-Origin-Opener-Policy": "same-origin"
         }
       },
+      "firebase": {
+        "webConfig": {
+          "apiKey": "AIzaSyAJZsjikSicVAnbckDHYQEC57Vx9p8ZrJ8",
+          "authDomain": "rehab-app-45234.firebaseapp.com",
+          "projectId":"rehab-app-45234",
+          "storageBucket": "rehab-app-45234.firebasestorage.app",
+          "messagingSenderId": "399838843863",
+          "appId": "1:399838843863:web:202d8a924716e254283192",
+           "measurementId": "G-66308XPSXB"
+        }
+      },
       "eas": {
         "projectId": "a129a682-e21f-4c4d-b259-7c8eac8aa0d0"
       }

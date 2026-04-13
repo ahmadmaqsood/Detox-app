@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { subscribeAuth } from '@/lib/firebase';
 import {
   getDetoxEnabled,
   setDetoxEnabled as persistDetox,
   getDetoxStreak,
   getDetoxStartDate,
-} from '@/lib/database';
+} from "@/lib/firestoreDatabase";
 
 interface DetoxContextValue {
   detox: boolean;
@@ -42,20 +43,39 @@ export function DetoxProvider({ children }: { children: ReactNode }) {
     setReady(true);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    return subscribeAuth((user) => {
+      if (!user) {
+        setDetoxState(false);
+        setStreak(0);
+        setStartedAt(null);
+        setReady(true);
+        return;
+      }
+      void load().catch(() => setReady(true));
+    });
+  }, [load]);
 
   const setDetox = useCallback(async (enabled: boolean) => {
     setDetoxState(enabled);
-    await persistDetox(enabled);
-    const [s, sd] = await Promise.all([getDetoxStreak(), getDetoxStartDate()]);
-    setStreak(s);
-    setStartedAt(sd);
+    try {
+      await persistDetox(enabled);
+      const [s, sd] = await Promise.all([getDetoxStreak(), getDetoxStartDate()]);
+      setStreak(s);
+      setStartedAt(sd);
+    } catch {
+      /* not signed in */
+    }
   }, []);
 
   const refreshStreak = useCallback(async () => {
-    const [s, sd] = await Promise.all([getDetoxStreak(), getDetoxStartDate()]);
-    setStreak(s);
-    setStartedAt(sd);
+    try {
+      const [s, sd] = await Promise.all([getDetoxStreak(), getDetoxStartDate()]);
+      setStreak(s);
+      setStartedAt(sd);
+    } catch {
+      /* not signed in */
+    }
   }, []);
 
   return (

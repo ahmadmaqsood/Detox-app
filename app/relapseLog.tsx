@@ -11,8 +11,8 @@ import * as Haptics from 'expo-haptics';
 
 import { Button } from '@/components/Button';
 import { Body, Caption, Heading } from '@/components/Typography';
-import { logRelapseEvent } from '@/lib/database';
-import { syncAchievements } from '@/lib/achievements';
+import { logRelapseEvent } from '@/lib/firestoreDatabase';
+import { syncFirestoreAchievements } from '@/lib/firestoreAchievements';
 import { RELAPSE_TRIGGERS, type RelapseTriggerId } from '@/lib/relapseTriggers';
 import { useAppTheme } from '@/theme';
 import { spacing, radius } from '@/theme/spacing';
@@ -29,7 +29,7 @@ export default function RelapseLogScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     try {
       await logRelapseEvent({ triggerTag: trigger, note: note.trim() });
-      await syncAchievements();
+      await syncFirestoreAchievements();
       router.back();
     } finally {
       setSaving(false);

@@ -1,12 +1,13 @@
-import { Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PlatformSymbol } from '@/components/PlatformSymbol';
 import * as Haptics from 'expo-haptics';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useNavigation } from 'expo-router';
+import { useNavigation, useRouter } from 'expo-router';
 import { type DrawerNavigationProp } from '@react-navigation/drawer';
 import { useCallback, useEffect, useState } from 'react';
 
+import { signOutUser } from '@/lib/firebase';
 import { getNotificationsEnabled, setNotificationsEnabled } from '@/lib/notificationPrefs';
 import { rescheduleSmartNotifications } from '@/lib/smartNotifications';
 import { useAppTheme } from '@/theme';
@@ -22,6 +23,12 @@ interface SettingsRow {
 }
 
 const SECTIONS: { title: string; rows: SettingsRow[] }[] = [
+  {
+    title: 'Account',
+    rows: [
+      { label: 'Log out', icon: { ios: 'rectangle.portrait.and.arrow.right', android: 'logout', web: 'logout' }, type: 'chevron' },
+    ],
+  },
   {
     title: 'General',
     rows: [
@@ -49,6 +56,7 @@ export default function SettingsScreen() {
   const t = useAppTheme();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<DrawerNavigationProp<any>>();
+  const router = useRouter();
   const [notificationsOn, setNotificationsOn] = useState(true);
 
   const loadNotif = useCallback(async () => {
@@ -93,7 +101,7 @@ export default function SettingsScreen() {
               {section.title.toUpperCase()}
             </Caption>
             <Card>
-              {section.title === 'General' && si === 0 && (
+              {section.title === 'General' && (
                 <Pressable
                   style={[styles.row, { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border }]}
                 >
@@ -120,9 +128,27 @@ export default function SettingsScreen() {
               {section.rows.map((row, ri) => (
                 <Pressable
                   key={row.label}
+                  onPress={
+                    section.title === 'Account' && row.label === 'Log out'
+                      ? () => {
+                          Alert.alert('Log out', 'Sign out of your account on this device?', [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Log out',
+                              style: 'destructive',
+                              onPress: async () => {
+                                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+                                await signOutUser();
+                                router.replace('/login');
+                              },
+                            },
+                          ]);
+                        }
+                      : undefined
+                  }
                   style={[
                     styles.row,
-                    (ri > 0 || (section.title === 'General' && si === 0)) && {
+                    (ri > 0 || section.title === 'General') && {
                       borderTopWidth: StyleSheet.hairlineWidth,
                       borderTopColor: t.border,
                     },

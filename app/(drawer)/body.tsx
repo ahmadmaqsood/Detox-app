@@ -9,11 +9,10 @@ import {
   getExerciseEntries,
   getExerciseMinutesByDay,
   getGoalWeightKg,
-  getMetrics,
   logBodyWeight,
-  saveMetrics,
   setGoalWeightKg,
 } from "@/lib/database";
+import { getMetrics, saveMetrics } from "@/lib/firestoreDatabase";
 import { computeEnergyScore } from "@/lib/energyScore";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";

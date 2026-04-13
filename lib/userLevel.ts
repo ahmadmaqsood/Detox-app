@@ -3,7 +3,7 @@ import {
   getGlobalLongestStreak,
   getGlobalStreak,
   getRelapseCountsLastTwoWindows,
-} from './database';
+} from './firestoreDatabase';
 
 export type UserLevel = 'beginner' | 'intermediate' | 'advanced';
 

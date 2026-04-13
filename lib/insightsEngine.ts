@@ -1,4 +1,4 @@
-import type { InsightSignals } from "@/lib/database";
+import type { InsightSignals } from "@/lib/firestoreDatabase";
 
 export type DeepInsight = {
   id: string;

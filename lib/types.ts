@@ -10,6 +10,17 @@ export interface HabitIcon {
   web: string;
 }
 
+/** Catalog row for achievements (Firestore `achievement_defs` + UI). */
+export type AchievementUnlockType = 'streak' | 'detox' | 'consistency' | 'special' | 'phase';
+
+export interface AchievementDefinition {
+  id: string;
+  title: string;
+  description: string;
+  icon: HabitIcon;
+  type: AchievementUnlockType;
+}
+
 export interface Habit {
   id: number;
   name: string;
@@ -18,6 +29,8 @@ export interface Habit {
   mode: Mode;
   lifeArea: LifeArea;
   targetPerDay: number;
+  /** Lower sorts first; used for Home daily order. */
+  sortOrder: number;
   createdAt: string;
 }
 
@@ -51,14 +64,22 @@ export interface ModeRow {
   currentMode: Mode;
 }
 
+export type ChallengeDifficulty = 'easy' | 'medium' | 'hard';
+
 export type ChallengeCategory =
   | 'discipline'
   | 'physical'
   | 'mental'
-  | 'spiritual';
+  | 'spiritual'
+  | 'detox'
+  | 'streak'
+  | 'consistency'
+  | 'special';
 
 export interface Challenge {
   id: number;
+  /** Stable id from catalog (e.g. streak_7). */
+  defId?: string;
   name: string;
   description: string;
   duration: number;
@@ -68,6 +89,8 @@ export interface Challenge {
   category: ChallengeCategory;
   /** Short rule text shown on the card (e.g. “No social apps”). */
   rules: string;
+  difficulty?: ChallengeDifficulty;
+  xp?: number;
 }
 
 /** One finished challenge run (persisted; not removed on template reset). */

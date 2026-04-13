@@ -8,7 +8,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { Body, Caption, Heading } from "@/components/Typography";
-import { getChallengeCompletionHistory } from "@/lib/database";
+import { getChallengeCompletionHistory } from "@/lib/firestoreDatabase";
 import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import type { ChallengeCompletionRecord } from "@/lib/types";
 import { useAppTheme } from "@/theme";

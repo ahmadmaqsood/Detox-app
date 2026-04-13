@@ -19,7 +19,7 @@ import { spacing, radius } from '@/theme/spacing';
 import { typography } from '@/theme/typography';
 import { Button } from '@/components/Button';
 import { Body, Caption, Heading } from '@/components/Typography';
-import { addHabit } from '@/lib/database';
+import { addHabit } from "@/lib/firestoreDatabase";
 import { useMode } from '@/store/ModeContext';
 import type { HabitIcon, LifeArea, Mode } from '@/lib/types';
 

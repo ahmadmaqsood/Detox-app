@@ -9,7 +9,7 @@ import {
   getGlobalLongestStreak,
   getEntriesCompletionSummary,
   getRelapseCountsLastTwoWindows,
-} from './database';
+} from './firestoreDatabase';
 import { evaluateUserLevel, type UserLevelState } from './userLevel';
 
 export type UserContext = UserLevelState & {

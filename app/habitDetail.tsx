@@ -35,7 +35,7 @@ import {
   getStreak,
   getLongestStreak,
   updateHabit,
-} from '@/lib/database';
+} from "@/lib/firestoreDatabase";
 import { parseHabitIcon } from '@/lib/types';
 import type { Habit, HabitIcon, LifeArea, Mode } from '@/lib/types';
 

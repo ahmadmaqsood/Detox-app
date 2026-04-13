@@ -34,7 +34,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '@/theme';
 import { spacing, radius } from '@/theme/spacing';
 import { typography } from '@/theme/typography';
-import { setOnboardingComplete } from '@/lib/database';
+import { useAuth } from "@/store/AuthContext";
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -70,6 +70,46 @@ const slides: Slide[] = [
     subtitle:
       'Build streaks, take on challenges, and watch yourself grow stronger every single day.',
     accentColor: '#818CF8',
+  },
+  {
+    id: "4",
+    emoji: "🌙",
+    title: "Sleep before 11",
+    subtitle:
+      "Early sleep protects your mind and energy. Build a clean night routine and wake up strong.",
+    accentColor: "#60A5FA",
+  },
+  {
+    id: "5",
+    emoji: "📈",
+    title: "Track your streak",
+    subtitle:
+      "Small wins every day become your identity. Don’t break the chain — even 1% progress counts.",
+    accentColor: "#34D399",
+  },
+  {
+    id: "6",
+    emoji: "🧱",
+    title: "Actions > plans",
+    subtitle:
+      "You don’t need motivation. You need actions. Open the app, do the habits, close the app.",
+    accentColor: "#F59E0B",
+  },
+  {
+    id: "7",
+    emoji: "🕌",
+    title: "Prayer in masjid",
+    subtitle:
+      "Make it non‑negotiable. Structure your day around prayer — it protects you from slips.",
+    accentColor: "#A78BFA",
+  },
+  {
+    id: "8",
+    emoji: "🚶",
+    title: "More movement = freedom",
+    subtitle:
+      "Movement clears urges. Walk, breathe, and reset your nervous system — you become free again.",
+    accentColor: "#4ADE80",
   },
 ];
 
@@ -313,6 +353,7 @@ export default function OnboardingScreen() {
   const t = useAppTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
   const flatListRef = useRef<FlatList>(null);
 
   const scrollX = useSharedValue(0);
@@ -342,8 +383,8 @@ export default function OnboardingScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     if (isLast) {
-      await setOnboardingComplete();
-      router.replace('/(tabs)/today');
+      // Onboarding is intentionally shown on every app open (no one-time completion).
+      router.replace(user ? "/(drawer)/(tabs)/today" : "/(auth)/login");
     } else {
       flatListRef.current?.scrollToIndex({
         index: activeIndex + 1,

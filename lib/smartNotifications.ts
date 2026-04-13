@@ -1,12 +1,9 @@
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
-import {
-  getAntiLazinessEnabled,
-  getHardMode,
-  getInsightSignals,
-  getMetrics,
-} from "@/lib/database";
+import { getAntiLazinessEnabled } from "@/lib/database";
+import { getFirebaseAuth } from "@/lib/firebase";
+import { getHardMode, getInsightSignals, getMetrics } from "@/lib/firestoreDatabase";
 import { getNotificationsEnabled } from "@/lib/notificationPrefs";
 
 let handlerInstalled = false;
@@ -73,6 +70,9 @@ export async function rescheduleSmartNotifications(): Promise<void> {
 
   const enabled = await getNotificationsEnabled();
   await Notifications.cancelAllScheduledNotificationsAsync();
+  if (!getFirebaseAuth()?.currentUser) {
+    return;
+  }
   if (!enabled) return;
 
   if (Platform.OS === "android") {

@@ -1,7 +1,7 @@
+import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import * as Haptics from "expo-haptics";
 import { useFocusEffect, useNavigation } from "expo-router";
-import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import Animated, {
@@ -29,7 +29,7 @@ import {
   type ModeComparison,
   type PeriodStats,
   type ScreenTimeDiscipline,
-} from "@/lib/database";
+} from "@/lib/firestoreDatabase";
 import {
   buildDeepInsights,
   type DeepInsight,
@@ -159,13 +159,13 @@ export default function StreaksScreen() {
                   size={14}
                 />
                 <Caption variant="caption1" color={t.textMuted}>
-                  Goal: 90d
+                  Goal: 180d
                 </Caption>
               </View>
             </View>
             <StreakProgressBar
               current={streak}
-              goal={90}
+              goal={180}
               color={t.accent}
               track={t.background}
             />

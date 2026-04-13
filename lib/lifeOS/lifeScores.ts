@@ -1,14 +1,14 @@
 import { computeEnergyScore } from "../energyScore";
+import { getExerciseMinutesForDate } from "../database";
 import {
   getEntriesCompletionSummary,
-  getExerciseMinutesForDate,
   getGlobalStreak,
   getHardMode,
   getHardModeStreak,
   getLifeAreaBalance,
   getMetrics,
   getWeeklyStats,
-} from "../database";
+} from "../firestoreDatabase";
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);

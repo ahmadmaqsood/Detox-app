@@ -1,8 +1,9 @@
+import { subscribeAuth } from "@/lib/firebase";
 import {
   getHardMode,
   getHardModeStreak,
   setHardMode as persistHardMode,
-} from "@/lib/database";
+} from "@/lib/firestoreDatabase";
 import { rescheduleSmartNotifications } from "@/lib/smartNotifications";
 import {
   createContext,
@@ -42,15 +43,27 @@ export function HardModeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    return subscribeAuth((user) => {
+      if (!user) {
+        setHardModeState(false);
+        setHardModeStreak(0);
+        setReady(true);
+        return;
+      }
+      void refresh().catch(() => setReady(true));
+    });
   }, [refresh]);
 
   const setHardMode = useCallback(
     async (enabled: boolean) => {
       setHardModeState(enabled);
-      await persistHardMode(enabled);
-      await refresh();
-      await rescheduleSmartNotifications();
+      try {
+        await persistHardMode(enabled);
+        await refresh();
+        await rescheduleSmartNotifications();
+      } catch {
+        /* not signed in */
+      }
     },
     [refresh],
   );

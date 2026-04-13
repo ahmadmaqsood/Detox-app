@@ -39,8 +39,8 @@ import {
   getYearlyStats,
   type LifeAreaBalanceRow,
   type ModeComparison,
-} from '@/lib/database';
-import { ACHIEVEMENTS, syncAchievements } from '@/lib/achievements';
+} from '@/lib/firestoreDatabase';
+import { syncFirestoreAchievements } from '@/lib/firestoreAchievements';
 import { formatRelapseHourLabel, RELAPSE_TRIGGERS } from '@/lib/relapseTriggers';
 import type { LifeArea } from '@/lib/types';
 
@@ -160,7 +160,7 @@ export default function ProfileScreen() {
   );
 
   const load = useCallback(async () => {
-    await syncAchievements();
+    await syncFirestoreAchievements();
     const [
       streak,
       best,
@@ -443,56 +443,7 @@ export default function ProfileScreen() {
           </Card>
         </Animated.View>
 
-        {/* Achievements */}
-        <Animated.View entering={FadeInDown.delay(160).springify().damping(18)}>
-          <SectionLabel t={t}>Achievements</SectionLabel>
-          <AchievementsCard unlocked={unlockedAchievements} t={t} />
-        </Animated.View>
-
-        {/* 4. Progress level */}
-        <Animated.View entering={FadeInDown.delay(180).springify().damping(18)}>
-          <SectionLabel t={t}>Progress level</SectionLabel>
-          <Card style={styles.levelCard}>
-            <View style={[styles.levelIconWrap, { backgroundColor: levelMeta.color + '18' }]}>
-              <PlatformSymbol
-                ios={
-                  levelForUi === 'advanced'
-                    ? 'star.fill'
-                    : levelForUi === 'intermediate'
-                      ? 'arrow.up.circle.fill'
-                      : 'leaf.fill'
-                }
-                material={
-                  levelForUi === 'advanced'
-                    ? 'star'
-                    : levelForUi === 'intermediate'
-                      ? 'trending_up'
-                      : 'eco'
-                }
-                tintColor={levelMeta.color}
-                size={28}
-              />
-            </View>
-            <Heading variant="title2" style={{ color: levelMeta.color }}>
-              {levelMeta.label}
-            </Heading>
-            <Body variant="callout" color={t.textSecondary} style={styles.levelBlurb}>
-              {levelMeta.blurb}
-            </Body>
-            <View style={styles.levelStats}>
-              {userLevelState && (
-                <Caption variant="caption2" color={t.textMuted} style={{ textAlign: 'center' }}>
-                  {trendCopy(userLevelState.relapseTrend)}
-                </Caption>
-              )}
-              <Caption variant="caption2" color={t.textMuted} style={{ textAlign: 'center' }}>
-                App behavior: alert if risk ≥{userLevelState?.riskAlertThreshold ?? '—'}, coach nudge
-                if screen ≥{userLevelState?.screenTimeAutoMessageAt ?? '—'}m. Overall{' '}
-                {entrySummary.rate}% · {entrySummary.total} logs.
-              </Caption>
-            </View>
-          </Card>
-        </Animated.View>
+        {/* Achievements + Progress level moved to Drawer → Achievements */}
       </ScrollView>
     </View>
   );
@@ -586,48 +537,7 @@ function LifeBalanceCard({
   );
 }
 
-function AchievementsCard({
-  unlocked,
-  t,
-}: {
-  unlocked: Set<string>;
-  t: ReturnType<typeof useAppTheme>;
-}) {
-  return (
-    <Card style={styles.sectionCard}>
-      <View style={styles.achGrid}>
-        {ACHIEVEMENTS.map((a) => {
-          const on = unlocked.has(a.id);
-          return (
-            <View
-              key={a.id}
-              style={[
-                styles.achCell,
-                {
-                  backgroundColor: t.cardElevated,
-                  borderColor: on ? t.accent + '55' : t.border,
-                },
-              ]}
-            >
-              <PlatformSymbol
-                ios={a.icon.ios}
-                material={a.icon.android}
-                tintColor={on ? t.accent : t.textMuted}
-                size={22}
-              />
-              <Body variant="subhead" style={{ color: on ? t.textPrimary : t.textMuted }}>
-                {a.title}
-              </Body>
-              <Caption variant="caption2" color={t.textMuted} style={{ textAlign: 'center' }}>
-                {on ? a.description : 'Locked'}
-              </Caption>
-            </View>
-          );
-        })}
-      </View>
-    </Card>
-  );
-}
+// Achievements UI moved to Drawer → Achievements.
 
 function SectionLabel({ children, t }: { children: string; t: ReturnType<typeof useAppTheme> }) {
   return (

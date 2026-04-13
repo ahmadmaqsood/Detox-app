@@ -1,8 +1,8 @@
 import {
+  getDetoxStreak,
   getEntriesCompletionSummary,
   getGlobalLongestStreak,
   getGlobalStreak,
-  getDetoxStreak,
   getUnlockedAchievementIds,
   unlockAchievement,
 } from './database';

@@ -1,5 +1,9 @@
 import * as SQLite from "expo-sqlite";
-import { defaultHabits } from "./seed";
+import {
+  defaultHabits,
+  homeRoutineHabitsV3,
+  legacyHomeHabitNames,
+} from "./seed";
 import type {
   AchievementUnlockRow,
   BodyWeightEntry,
@@ -7,8 +11,6 @@ import type {
   ChallengeCategory,
   ChallengeCompletionRecord,
   ChallengeStats,
-  SpiritualCadence,
-  SpiritualChallengeDashboard,
   DailyReset,
   DietMeal,
   DietRules,
@@ -23,6 +25,8 @@ import type {
   Mode,
   ModeRow,
   RelapseEvent,
+  SpiritualCadence,
+  SpiritualChallengeDashboard,
   TimeBlock,
   UrgeLog
 } from "./types";
@@ -150,7 +154,7 @@ async function initDBOnce(): Promise<void> {
   if (!seeded) {
     for (const h of defaultHabits) {
       await d.runAsync(
-        `INSERT INTO habits (name, icon, color, mode, targetPerDay, lifeArea) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO habits (name, icon, color, mode, targetPerDay, lifeArea, sortOrder) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           h.name,
           JSON.stringify(h.icon),
@@ -158,6 +162,7 @@ async function initDBOnce(): Promise<void> {
           h.mode,
           h.targetPerDay,
           h.lifeArea,
+          h.sortOrder ?? 0,
         ],
       );
     }
@@ -176,10 +181,10 @@ async function initDBOnce(): Promise<void> {
         duration: 30,
       },
       {
-        name: "90 Day Transformation",
+        name: "180 Day Transformation",
         description:
           "Complete transformation. 90 days of consistent discipline and self-control.",
-        duration: 90,
+        duration: 180,
       },
     ];
     for (const c of defaultChallenges) {
@@ -257,18 +262,65 @@ async function migrateSchema(d: SQLite.SQLiteDatabase): Promise<void> {
   );
   if (!backfill) {
     await d.runAsync(
-      `UPDATE habits SET lifeArea = 'spiritual' WHERE name LIKE '%Namaz%' OR name LIKE '%Quran%' OR name LIKE '%Surah%' OR name LIKE '%Yaseen%' OR name LIKE '%Mulk%'`,
+      `UPDATE habits SET lifeArea = 'spiritual' WHERE name LIKE '%Namaz%' OR name LIKE '%Quran%' OR name LIKE '%Surah%' OR name LIKE '%Yaseen%' OR name LIKE '%Mulk%' OR name LIKE '%Fajr%' OR name LIKE '%Zuhr%' OR name LIKE '%Asr%' OR name LIKE '%Maghrib%' OR name LIKE '%Isha%'`,
     );
     await d.runAsync(
-      `UPDATE habits SET lifeArea = 'physical' WHERE name LIKE '%Exercise%' OR name LIKE '%Walk%' OR name LIKE '%Sleep%' OR name LIKE '%Light Exercise%'`,
+      `UPDATE habits SET lifeArea = 'physical' WHERE name LIKE '%Exercise%' OR name LIKE '%Walk%' OR name LIKE '%Sleep%' OR name LIKE '%Light Exercise%' OR name LIKE '%Breakfast%' OR name LIKE '%Lunch%' OR name LIKE '%Dinner%' OR name LIKE '%Nap%'`,
     );
     await d.runAsync(
-      `UPDATE habits SET lifeArea = 'work' WHERE name LIKE '%Deep Work%' OR name LIKE '%Study%'`,
+      `UPDATE habits SET lifeArea = 'work' WHERE name LIKE '%OFfice Work%' OR name LIKE '%Study%'`,
     );
     await d.runAsync(
       `INSERT OR REPLACE INTO _meta (key, value) VALUES ('life_area_v1', '1')`,
     );
   }
+
+  const habitColsForSort = await d.getAllAsync<{ name: string }>(
+    "PRAGMA table_info(habits)",
+  );
+  if (!habitColsForSort.some((c) => c.name === "sortOrder")) {
+    await d.execAsync(
+      `ALTER TABLE habits ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
+
+  const homeV3 = await d.getFirstAsync<{ value: string }>(
+    `SELECT value FROM _meta WHERE key = 'home_routine_v3'`,
+  );
+  if (!homeV3) {
+    const ph = legacyHomeHabitNames.map(() => "?").join(",");
+    const legacyCount = await d.getFirstAsync<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM habits WHERE mode = 'home' AND name IN (${ph})`,
+      [...legacyHomeHabitNames],
+    );
+    if ((legacyCount?.c ?? 0) > 0) {
+      await d.runAsync(
+        `DELETE FROM habits WHERE mode = 'home' AND name IN (${ph})`,
+        [...legacyHomeHabitNames],
+      );
+      for (const h of homeRoutineHabitsV3) {
+        await d.runAsync(
+          `INSERT INTO habits (name, icon, color, mode, targetPerDay, lifeArea, sortOrder) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            h.name,
+            JSON.stringify(h.icon),
+            h.color,
+            h.mode,
+            h.targetPerDay,
+            h.lifeArea,
+            h.sortOrder,
+          ],
+        );
+      }
+    }
+    await d.runAsync(
+      `INSERT OR REPLACE INTO _meta (key, value) VALUES ('home_routine_v3', '1')`,
+    );
+  }
+
+  await d.runAsync(
+    `UPDATE habits SET name = 'No phone usage' WHERE mode = 'hostel' AND name = 'Limited Phone'`,
+  );
 
   // Rename to a simpler, less "cheap-looking" label.
   // Existing entries are keyed by habitId, so this only updates the displayed name.
@@ -370,7 +422,7 @@ async function migrateSchema(d: SQLite.SQLiteDatabase): Promise<void> {
         rules: "Complete all five salahs mindfully each day.",
       },
       {
-        name: "Deep Work 2 Hours (21 days)",
+        name: "Office Work 12-9pm",
         description: "Protected focus block on weekdays.",
         duration: 21,
         category: "mental",
@@ -408,6 +460,22 @@ async function migrateSchema(d: SQLite.SQLiteDatabase): Promise<void> {
       intensity INTEGER NOT NULL CHECK(intensity BETWEEN 1 AND 10),
       triggerTag TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  await d.execAsync(`
+    CREATE TABLE IF NOT EXISTS urge_tool_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      startedAt TEXT NOT NULL,
+      endedAt TEXT
+    );
+  `);
+  await d.execAsync(`
+    CREATE TABLE IF NOT EXISTS urge_tool_action_completions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId INTEGER NOT NULL,
+      actionLabel TEXT NOT NULL,
+      completedAt TEXT NOT NULL,
+      FOREIGN KEY (sessionId) REFERENCES urge_tool_sessions(id) ON DELETE CASCADE
     );
   `);
   await d.execAsync(`
@@ -673,6 +741,7 @@ export async function addHabit(
     mode?: Mode;
     lifeArea?: LifeArea;
     targetPerDay?: number;
+    sortOrder?: number;
   },
 ): Promise<number> {
   const d = await getDB();
@@ -683,8 +752,8 @@ export async function addHabit(
         JSON.stringify({ ios: "star.fill", android: "star", web: "star" }));
 
   const result = await d.runAsync(
-    `INSERT INTO habits (name, icon, color, mode, targetPerDay, lifeArea)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO habits (name, icon, color, mode, targetPerDay, lifeArea, sortOrder)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       habit.name,
       iconStr,
@@ -692,6 +761,7 @@ export async function addHabit(
       habit.mode ?? "home",
       habit.targetPerDay ?? 1,
       habit.lifeArea ?? "mental",
+      habit.sortOrder ?? 0,
     ],
   );
   return result.lastInsertRowId;
@@ -699,7 +769,9 @@ export async function addHabit(
 
 export async function getAllHabits(): Promise<Habit[]> {
   const d = await getDB();
-  return d.getAllAsync<Habit>("SELECT * FROM habits ORDER BY createdAt DESC");
+  return d.getAllAsync<Habit>(
+    "SELECT * FROM habits ORDER BY mode ASC, sortOrder ASC, createdAt DESC",
+  );
 }
 
 export async function getHabitById(id: number): Promise<Habit | null> {
@@ -710,7 +782,7 @@ export async function getHabitById(id: number): Promise<Habit | null> {
 export async function updateHabit(
   id: number,
   updates: Partial<
-    Pick<Habit, "name" | "color" | "mode" | "targetPerDay" | "lifeArea"> & {
+    Pick<Habit, "name" | "color" | "mode" | "targetPerDay" | "lifeArea" | "sortOrder"> & {
       icon: string | HabitIcon;
     }
   >,
@@ -746,6 +818,10 @@ export async function updateHabit(
   if (updates.targetPerDay !== undefined) {
     sets.push("targetPerDay = ?");
     vals.push(updates.targetPerDay);
+  }
+  if (updates.sortOrder !== undefined) {
+    sets.push("sortOrder = ?");
+    vals.push(updates.sortOrder);
   }
 
   if (sets.length === 0) return;
@@ -839,7 +915,7 @@ export async function getTodayHabits(
        FROM habits h
        LEFT JOIN entries e ON e.habitId = h.id AND e.date = ?
        WHERE h.mode = ?
-       ORDER BY h.createdAt ASC`,
+       ORDER BY h.sortOrder ASC, h.createdAt ASC`,
       [day, mode],
     );
   }
@@ -848,7 +924,7 @@ export async function getTodayHabits(
     `SELECT h.*, COALESCE(e.completed, 0) AS completed
      FROM habits h
      LEFT JOIN entries e ON e.habitId = h.id AND e.date = ?
-     ORDER BY h.createdAt ASC`,
+     ORDER BY h.sortOrder ASC, h.createdAt ASC`,
     [day],
   );
 }
@@ -936,6 +1012,36 @@ export async function getGlobalStreak(): Promise<number> {
        FROM habits h
        LEFT JOIN entries e ON e.habitId = h.id AND e.date = ?`,
       [iso],
+    );
+    if (!row || row.total === 0 || row.done / row.total < 0.5) break;
+    streak++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+/** Consecutive days (from today backward) where ≥50% of habits for this mode were completed. */
+export async function getModeStreak(mode: Mode): Promise<number> {
+  const d = await getDB();
+  const habitRows = await d.getAllAsync<{ id: number }>(
+    `SELECT id FROM habits WHERE mode = ?`,
+    [mode],
+  );
+  if (habitRows.length === 0) return 0;
+
+  let streak = 0;
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+
+  while (true) {
+    const iso = cursor.toISOString().slice(0, 10);
+    const row = await d.getFirstAsync<{ total: number; done: number }>(
+      `SELECT COUNT(DISTINCT h.id) AS total,
+              COUNT(DISTINCT CASE WHEN e.completed = 1 THEN h.id END) AS done
+       FROM habits h
+       LEFT JOIN entries e ON e.habitId = h.id AND e.date = ?
+       WHERE h.mode = ?`,
+      [iso, mode],
     );
     if (!row || row.total === 0 || row.done / row.total < 0.5) break;
     streak++;
@@ -1775,6 +1881,40 @@ export async function hasTodayInterventionAction(action: string): Promise<boolea
   return (row?.n ?? 0) > 0;
 }
 
+/** Urge tool switch turned on — recovery plan active; returns session id. */
+export async function startUrgeToolSession(): Promise<number> {
+  const d = await getDB();
+  const now = new Date().toISOString();
+  const result = await d.runAsync(
+    `INSERT INTO urge_tool_sessions (startedAt) VALUES (?)`,
+    [now],
+  );
+  return result.lastInsertRowId;
+}
+
+/** Urge tool switch turned off — closes the active session. */
+export async function endUrgeToolSession(sessionId: number): Promise<void> {
+  const d = await getDB();
+  const now = new Date().toISOString();
+  await d.runAsync(
+    `UPDATE urge_tool_sessions SET endedAt = ? WHERE id = ? AND endedAt IS NULL`,
+    [now, sessionId],
+  );
+}
+
+/** Log one completed recovery tile during an urge session (date/time = completedAt). */
+export async function recordUrgeToolActionCompletion(
+  sessionId: number,
+  actionLabel: string,
+): Promise<void> {
+  const d = await getDB();
+  const now = new Date().toISOString();
+  await d.runAsync(
+    `INSERT INTO urge_tool_action_completions (sessionId, actionLabel, completedAt) VALUES (?, ?, ?)`,
+    [sessionId, actionLabel, now],
+  );
+}
+
 // ─── Helpers: Onboarding ─────────────────────────────────────
 
 export async function isOnboardingComplete(): Promise<boolean> {
@@ -1796,16 +1936,30 @@ export async function setOnboardingComplete(): Promise<void> {
 
 const ESSENTIAL_HABITS = new Set([
   "No Explicit Content",
-  // Backward compatibility for existing installs.
   "No Porn",
+  "No phone usage",
+  "Limited Phone",
+  "Limited Phone Usage",
   "Namaz",
   "Quran Reading",
   "Quran",
+  "Quran (morning)",
   "Exercise",
   "Light Exercise",
   "Walk",
+  "Morning walk",
+  "Afternoon walk",
   "Sleep Before 12",
-  "Deep Work",
+  "Sleep before 10 pm",
+  "Fajr",
+  "Zuhr",
+  "Asr",
+  "Maghrib",
+  "Isha",
+  "Surah Yaseen (after Fajr)",
+  "Morning Surah Yaseen",
+  "Surah Mulk",
+  "Office Work",
 ]);
 
 export function isEssentialHabit(name: string): boolean {

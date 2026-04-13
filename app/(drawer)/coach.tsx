@@ -27,6 +27,7 @@ import { generateResponse, getAutoMessage } from "@/lib/aiEngine";
 import { COACH_QUICK_ACTIONS } from "@/lib/coachQuickActions";
 import { getUserContext, type UserContext } from "@/lib/contextBuilder";
 import type { ChatMessage } from "@/lib/types";
+import { addCoachChatMessage, getCoachChatMessages } from "@/lib/firestoreDatabase";
 import { useAppTheme } from "@/theme";
 import { spacing } from "@/theme/spacing";
 
@@ -76,13 +77,26 @@ export default function CoachScreen() {
       const context = await getUserContext();
       setCtx(context);
 
+      // Load persisted chat history (Firestore)
+      try {
+        const saved = await getCoachChatMessages(200);
+        if (saved.length > 0) {
+          setMessages([WELCOME, ...saved.filter((m) => m.id !== WELCOME.id)]);
+          scrollToEnd();
+        }
+      } catch {
+        // Ignore load errors; fallback to in-memory only
+      }
+
       if (autoTriggeredRef.current) return;
       autoTriggeredRef.current = true;
 
       const auto = getAutoMessage(context);
       if (auto) {
         setTimeout(() => {
-          setMessages((prev) => [...prev, makeMsg("ai", auto)]);
+          const autoMsg = makeMsg("ai", auto);
+          setMessages((prev) => [...prev, autoMsg]);
+          addCoachChatMessage(autoMsg).catch(() => {});
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           scrollToEnd();
         }, 800);
@@ -98,6 +112,7 @@ export default function CoachScreen() {
 
       const userMsg = makeMsg("user", text.trim());
       setMessages((prev) => [...prev, userMsg]);
+      addCoachChatMessage(userMsg).catch(() => {});
       setInput("");
       setIsTyping(true);
       scrollToEnd();
@@ -109,7 +124,9 @@ export default function CoachScreen() {
       const delay = 400 + Math.random() * 300;
       setTimeout(() => {
         const reply = generateResponse(text, freshCtx);
-        setMessages((prev) => [...prev, makeMsg("ai", reply)]);
+        const aiMsg = makeMsg("ai", reply);
+        setMessages((prev) => [...prev, aiMsg]);
+        addCoachChatMessage(aiMsg).catch(() => {});
         setIsTyping(false);
         scrollToEnd();
       }, delay);

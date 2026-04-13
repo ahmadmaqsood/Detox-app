@@ -1,12 +1,15 @@
 import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import * as Haptics from "expo-haptics";
-import { useFocusEffect, useNavigation } from "expo-router";
+import { useFocusEffect, useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  Keyboard,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  TextInput,
   View,
 } from "react-native";
 import Animated, {
@@ -20,17 +23,18 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { Button } from "@/components/Button";
+import { Card } from "@/components/Card";
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { Body, Caption, Heading } from "@/components/Typography";
 import {
-  getChallengeStats,
   getChallenges,
+  getChallengeStats,
   incrementChallengeProgress,
   resetChallenge,
   startChallenge,
-} from "@/lib/database";
-import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
+} from "@/lib/firestoreDatabase";
 import type { Challenge, ChallengeCategory, ChallengeStats } from "@/lib/types";
+import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -42,6 +46,10 @@ const CATEGORY_LABELS: Record<ChallengeCategory, string> = {
   physical: "Physical",
   mental: "Mental",
   spiritual: "Spiritual",
+  detox: "Detox",
+  streak: "Streak",
+  consistency: "Consistency",
+  special: "Special",
 };
 
 function categoryVisual(cat: ChallengeCategory) {
@@ -69,6 +77,30 @@ function categoryVisual(cat: ChallengeCategory) {
         color: "#FBBF24",
         ios: "hands.sparkles.fill" as const,
         material: "hands-pray",
+      };
+    case "detox":
+      return {
+        color: "#34D399",
+        ios: "leaf.fill" as const,
+        material: "eco",
+      };
+    case "streak":
+      return {
+        color: "#F97316",
+        ios: "flame.fill" as const,
+        material: "whatshot",
+      };
+    case "consistency":
+      return {
+        color: "#38BDF8",
+        ios: "chart.line.uptrend.xyaxis" as const,
+        material: "trending-up",
+      };
+    case "special":
+      return {
+        color: "#FB7185",
+        ios: "sparkles" as const,
+        material: "auto-awesome",
       };
     default:
       return {
@@ -117,16 +149,34 @@ function challengeMeta(duration: number) {
 
 type CatFilter = "all" | ChallengeCategory;
 
+const CATEGORY_FILTER_KEYS = [
+  "all",
+  "streak",
+  "detox",
+  "discipline",
+  "mental",
+  "physical",
+  "consistency",
+  "special",
+  "spiritual",
+] as const;
+
 export default function ChallengesScreen() {
   const t = useAppTheme();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<DrawerNavigationProp<any>>();
+  const router = useRouter();
   const [challenges, setChallenges] = useState<Challenge[]>([]);
   const [challengeStats, setChallengeStats] = useState<ChallengeStats>({
     totalCompleted: 0,
     totalDaysCompleted: 0,
   });
   const [catFilter, setCatFilter] = useState<CatFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<
+    "new" | "in_progress" | "completed"
+  >("in_progress");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false);
   const [showChallengeComplete, setShowChallengeComplete] = useState(false);
   const scrollRef = useScrollToTopOnTabFocus();
 
@@ -145,15 +195,19 @@ export default function ChallengesScreen() {
     }, [load]),
   );
 
-  const visible = useMemo(
-    () =>
-      challenges.filter(
-        (c) =>
-          catFilter === "all" ||
-          (c.category ?? "discipline") === catFilter,
-      ),
-    [challenges, catFilter],
-  );
+  const visible = useMemo(() => {
+    let rows = challenges.filter(
+      (c) =>
+        catFilter === "all" || (c.category ?? "discipline") === catFilter,
+    );
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter((c) => c.name.toLowerCase().includes(q));
+    }
+    return rows;
+  }, [challenges, catFilter, searchQuery]);
+
+  const filtersAreDefault = catFilter === "all" && statusFilter === "in_progress";
 
   const activeChallenges = visible.filter(
     (c) => c.startedAt && !c.completedAt,
@@ -161,6 +215,13 @@ export default function ChallengesScreen() {
   const availableChallenges = visible.filter(
     (c) => !c.startedAt && !c.completedAt,
   );
+  const completedChallenges = visible.filter((c) => Boolean(c.completedAt));
+
+  const listForStatus = useMemo(() => {
+    if (statusFilter === "new") return availableChallenges;
+    if (statusFilter === "completed") return completedChallenges;
+    return activeChallenges;
+  }, [statusFilter, availableChallenges, completedChallenges, activeChallenges]);
 
   const handleStart = async (id: number) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -268,54 +329,82 @@ export default function ChallengesScreen() {
           </View>
         </Animated.View>
 
-        {/* ─── Category filter ─────────────────────── */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterScroll}
-        >
-          {(
-            [
-              "all",
-              "discipline",
-              "physical",
-              "mental",
-              "spiritual",
-            ] as const
-          ).map((key) => {
-            const activeChip = catFilter === key;
-            return (
-              <Pressable
-                key={key}
-                onPress={() => {
-                  Haptics.selectionAsync();
-                  setCatFilter(key);
-                }}
-                style={[
-                  styles.filterChip,
-                  {
-                    backgroundColor: activeChip ? t.accent + "22" : t.card,
-                    borderColor: activeChip ? t.accent : t.border,
-                  },
-                ]}
-              >
-                <Caption
-                  variant="caption2"
-                  color={activeChip ? t.accent : t.textSecondary}
-                  style={{ fontWeight: "700" }}
-                >
-                  {key === "all" ? "All" : CATEGORY_LABELS[key]}
-                </Caption>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
+        {/* ─── Search + filter (single row) ───────── */}
+        <View style={styles.searchFilterRow}>
+          <View
+            style={[
+              styles.searchField,
+              { backgroundColor: t.background, borderColor: t.border },
+            ]}
+          >
+            <PlatformSymbol
+              ios="magnifyingglass"
+              material="magnify"
+              tintColor={t.textMuted}
+              size={18}
+            />
+            <TextInput
+              style={[styles.searchInput, { color: t.textPrimary }]}
+              placeholder="Search by name…"
+              placeholderTextColor={t.textMuted}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+              clearButtonMode="while-editing"
+            />
+          </View>
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              Keyboard.dismiss();
+              setFilterSheetOpen(true);
+            }}
+            style={[
+              styles.filterButton,
+              {
+                backgroundColor: filtersAreDefault ? t.card : t.accent + "18",
+                borderColor: filtersAreDefault ? t.border : t.accent,
+              },
+            ]}
+          >
+            <PlatformSymbol
+              ios="line.3.horizontal.decrease.circle"
+              material="tune"
+              tintColor={filtersAreDefault ? t.textSecondary : t.accent}
+              size={22}
+            />
+            <Caption
+              variant="caption2"
+              color={filtersAreDefault ? t.textSecondary : t.accent}
+              style={{ fontWeight: "700" }}
+            >
+              Filters
+            </Caption>
+          </Pressable>
+        </View>
 
-        {/* ─── Active Challenges ───────────────────── */}
-        {activeChallenges.length > 0 && (
+        {/* ─── Challenges list ─────────────────────── */}
+        {listForStatus.length > 0 && (
           <View style={styles.section}>
-            <SectionLabel label="ACTIVE" color={t.accent} t={t} />
-            {activeChallenges.map((c, i) => (
+            <SectionLabel
+              label={
+                statusFilter === "new"
+                  ? "AVAILABLE"
+                  : statusFilter === "completed"
+                    ? "COMPLETED"
+                    : "ACTIVE"
+              }
+              color={
+                statusFilter === "completed"
+                  ? "#F59E0B"
+                  : statusFilter === "new"
+                    ? t.textSecondary
+                    : t.accent
+              }
+              t={t}
+            />
+            {listForStatus.map((c, i) => (
               <Animated.View
                 key={c.id}
                 entering={FadeInDown.delay(i * 80).duration(300)}
@@ -323,35 +412,149 @@ export default function ChallengesScreen() {
                 <ChallengeCard
                   challenge={c}
                   t={t}
-                  onLogDay={() => handleLogDay(c.id)}
-                  onReset={() => handleReset(c.id, c.name)}
+                  onLogDay={
+                    statusFilter === "in_progress" ? () => handleLogDay(c.id) : undefined
+                  }
+                  onReset={
+                    statusFilter === "in_progress" ? () => handleReset(c.id, c.name) : undefined
+                  }
+                  onStart={statusFilter === "new" ? () => handleStart(c.id) : undefined}
+                  onOpen={() =>
+                    router.push({
+                      pathname: "/challengeDetail",
+                      params: { id: String(c.id) },
+                    } as any)
+                  }
                 />
               </Animated.View>
             ))}
           </View>
         )}
-
-        {/* ─── Available Challenges ────────────────── */}
-        {availableChallenges.length > 0 && (
-          <View style={styles.section}>
-            <SectionLabel label="AVAILABLE" color={t.textSecondary} t={t} />
-            {availableChallenges.map((c, i) => (
-              <Animated.View
-                key={c.id}
-                entering={FadeInDown.delay(
-                  (activeChallenges.length + i) * 80,
-                ).duration(300)}
-              >
-                <ChallengeCard
-                  challenge={c}
-                  t={t}
-                  onStart={() => handleStart(c.id)}
-                />
-              </Animated.View>
-            ))}
-          </View>
+        {listForStatus.length === 0 && (
+          <Card style={[styles.emptyCard, { backgroundColor: t.card }]}>
+            <Body variant="callout" color={t.textSecondary}>
+              {searchQuery.trim()
+                ? "No challenges match your search."
+                : "Nothing here yet."}
+            </Body>
+          </Card>
         )}
       </ScrollView>
+
+      <Modal
+        visible={filterSheetOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setFilterSheetOpen(false)}
+      >
+        <View style={styles.sheetRoot}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, styles.sheetDim]}
+            onPress={() => {
+              Keyboard.dismiss();
+              setFilterSheetOpen(false);
+            }}
+          />
+          <View
+            style={[
+              styles.sheetCard,
+              {
+                backgroundColor: t.card,
+                paddingBottom: insets.bottom + spacing.lg,
+              },
+            ]}
+          >
+            <View style={styles.sheetGrab} />
+            <Heading variant="title3" style={styles.sheetTitle}>
+              Filters
+            </Heading>
+            <ScrollView
+              style={styles.sheetScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <Caption variant="caption1" color={t.textMuted} style={styles.sheetSectionLabel}>
+                Category
+              </Caption>
+              <View style={styles.sheetChipWrap}>
+                {CATEGORY_FILTER_KEYS.map((key) => {
+                  const on = catFilter === key;
+                  return (
+                    <Pressable
+                      key={key}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        setCatFilter(key);
+                      }}
+                      style={[
+                        styles.sheetChip,
+                        {
+                          backgroundColor: on ? t.accent + "22" : t.background,
+                          borderColor: on ? t.accent : t.border,
+                        },
+                      ]}
+                    >
+                      <Caption
+                        variant="caption2"
+                        color={on ? t.accent : t.textSecondary}
+                        style={{ fontWeight: "700" }}
+                      >
+                        {key === "all" ? "All" : CATEGORY_LABELS[key]}
+                      </Caption>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Caption variant="caption1" color={t.textMuted} style={styles.sheetSectionLabel}>
+                Status
+              </Caption>
+              <View style={styles.sheetChipWrap}>
+                {(["new", "in_progress", "completed"] as const).map((k) => {
+                  const on = statusFilter === k;
+                  const label =
+                    k === "new"
+                      ? "New"
+                      : k === "in_progress"
+                        ? "In progress"
+                        : "Completed";
+                  return (
+                    <Pressable
+                      key={k}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        setStatusFilter(k);
+                      }}
+                      style={[
+                        styles.sheetChip,
+                        {
+                          backgroundColor: on ? t.accent + "22" : t.background,
+                          borderColor: on ? t.accent : t.border,
+                        },
+                      ]}
+                    >
+                      <Caption
+                        variant="caption2"
+                        color={on ? t.accent : t.textSecondary}
+                        style={{ fontWeight: "700" }}
+                      >
+                        {label}
+                      </Caption>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </ScrollView>
+            <Pressable
+              onPress={() => setFilterSheetOpen(false)}
+              style={[styles.sheetDoneBtn, { backgroundColor: t.accent }]}
+            >
+              <Body variant="headline" color="#fff">
+                Done
+              </Body>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {showChallengeComplete && (
         <Animated.View
@@ -394,12 +597,14 @@ function ChallengeCard({
   onStart,
   onLogDay,
   onReset,
+  onOpen,
 }: {
   challenge: Challenge;
   t: ReturnType<typeof useAppTheme>;
   onStart?: () => void;
   onLogDay?: () => void;
   onReset?: () => void;
+  onOpen?: () => void;
 }) {
   const meta = challengeMeta(c.duration);
   const cat = (c.category ?? "discipline") as ChallengeCategory;
@@ -410,7 +615,8 @@ function ChallengeCard({
   const remaining = c.duration - c.progress;
 
   return (
-    <View style={[styles.card, { backgroundColor: t.card }]}>
+    <Pressable onPress={onOpen} disabled={!onOpen}>
+      <View style={[styles.card, { backgroundColor: t.card }]}>
       {/* Header row */}
       <View style={styles.cardHeader}>
         <View
@@ -427,6 +633,9 @@ function ChallengeCard({
           <Heading variant="title3">{c.name}</Heading>
           <Caption variant="caption2" color={t.textMuted}>
             {CATEGORY_LABELS[cat]} · {meta.tier} · {c.duration} days
+            {c.difficulty && c.xp != null
+              ? ` · ${c.difficulty} · ${c.xp} XP`
+              : ""}
           </Caption>
         </View>
         {isCompleted && <CompletionBadge color={cv.color} />}
@@ -581,7 +790,8 @@ function ChallengeCard({
           </Pressable>
         )}
       </View>
-    </View>
+      </View>
+    </Pressable>
   );
 }
 
@@ -688,7 +898,7 @@ function SectionLabel({
 function buildMilestones(duration: number): number[] {
   if (duration <= 7) return [1, 3, 5, 7];
   if (duration <= 30) return [1, 7, 14, 21, 30];
-  return [1, 7, 30, 60, 90];
+  return [1, 7, 30, 60, 90,120,150,180];
 }
 
 // ─── Styles ────────────────────────────────────────────────────
@@ -757,18 +967,98 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
 
-  filterScroll: {
+  searchFilterRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
     paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.xs,
+  },
+  searchField: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    paddingVertical: spacing.xs,
+  },
+  filterButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.lg,
+    borderWidth: 1,
   },
   filterChip: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.full,
     borderWidth: 1,
+  },
+  sheetRoot: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  sheetDim: {
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+  sheetCard: {
+    borderTopLeftRadius: radius["2xl"],
+    borderTopRightRadius: radius["2xl"],
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.md,
+    maxHeight: "88%",
+  },
+  sheetScroll: {
+    maxHeight: 420,
+  },
+  sheetGrab: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(128,128,128,0.35)",
+    marginBottom: spacing.md,
+  },
+  sheetTitle: {
+    marginBottom: spacing.md,
+  },
+  sheetSectionLabel: {
+    marginBottom: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  sheetChipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  sheetChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
+  sheetDoneBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+    marginTop: spacing.sm,
+  },
+  emptyCard: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.xl,
+    padding: spacing.xl,
+    borderRadius: radius.xl,
   },
 
   // Card

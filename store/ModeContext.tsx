@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
-import { getMode, setMode as persistMode } from '@/lib/database';
+import { subscribeAuth } from '@/lib/firebase';
+import { getMode, setMode as persistMode } from '@/lib/firestoreDatabase';
 import type { Mode } from '@/lib/types';
 
 interface ModeContextValue {
@@ -19,15 +20,28 @@ export function ModeProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    getMode().then((m) => {
-      setModeState(m);
-      setReady(true);
+    return subscribeAuth((user) => {
+      if (!user) {
+        setModeState('hostel');
+        setReady(true);
+        return;
+      }
+      void getMode()
+        .then((m) => {
+          setModeState(m);
+          setReady(true);
+        })
+        .catch(() => setReady(true));
     });
   }, []);
 
   const setMode = useCallback(async (m: Mode) => {
     setModeState(m);
-    await persistMode(m);
+    try {
+      await persistMode(m);
+    } catch {
+      /* not signed in */
+    }
   }, []);
 
   return (
