@@ -1,4 +1,3 @@
-import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
 import {
@@ -158,6 +157,7 @@ const RULES: Record<string, (s: Stats) => boolean> = {
 async function notify(def: AchievementDefV2) {
   if (Platform.OS === "web") return;
   try {
+    const Notifications = await import("expo-notifications");
     await Notifications.scheduleNotificationAsync({
       content: {
         title: "Achievement unlocked",

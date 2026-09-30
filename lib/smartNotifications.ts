@@ -11,14 +11,18 @@ let handlerInstalled = false;
 export function ensureNotificationHandler(): void {
   if (handlerInstalled || Platform.OS === "web") return;
   handlerInstalled = true;
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
-  });
+  try {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+  } catch (err) {
+    console.warn("ensureNotificationHandler failed:", err);
+  }
 }
 
 export async function requestNotificationPermissions(): Promise<boolean> {
@@ -66,86 +70,56 @@ function buildSmartBodies(
  */
 export async function rescheduleSmartNotifications(): Promise<void> {
   if (Platform.OS === "web") return;
-  ensureNotificationHandler();
+  try {
+    ensureNotificationHandler();
 
-  const enabled = await getNotificationsEnabled();
-  await Notifications.cancelAllScheduledNotificationsAsync();
-  if (!getFirebaseAuth()?.currentUser) {
-    return;
-  }
-  if (!enabled) return;
+    const enabled = await getNotificationsEnabled();
+    await Notifications.cancelAllScheduledNotificationsAsync();
+    if (!getFirebaseAuth()?.currentUser) {
+      return;
+    }
+    if (!enabled) return;
 
-  if (Platform.OS === "android") {
-    await Notifications.setNotificationChannelAsync("detox-default", {
-      name: "Detox reminders",
-      importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: "#4ADE80",
-    });
-  }
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync("detox-default", {
+        name: "Detox reminders",
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: "#4ADE80",
+      });
+    }
 
-  const granted = await requestNotificationPermissions();
-  if (!granted) return;
+    const granted = await requestNotificationPermissions();
+    if (!granted) return;
 
-  const [signals, metrics, hardMode, antiLazy] = await Promise.all([
-    getInsightSignals(),
-    getMetrics(),
-    getHardMode(),
-    getAntiLazinessEnabled(),
-  ]);
+    const [signals, metrics, hardMode, antiLazy] = await Promise.all([
+      getInsightSignals(),
+      getMetrics(),
+      getHardMode(),
+      getAntiLazinessEnabled(),
+    ]);
 
-  const riskScore = metrics?.riskScore ?? 0;
-  const { midday, evening, morning } = buildSmartBodies(
-    signals,
-    riskScore,
-    hardMode,
-  );
+    const riskScore = metrics?.riskScore ?? 0;
+    const { midday, evening, morning } = buildSmartBodies(
+      signals,
+      riskScore,
+      hardMode,
+    );
 
-  const slots: {
-    hour: number;
-    minute: number;
-    title: string;
-    body: string;
-  }[] = [
-    { hour: 9, minute: 30, title: "Detox — morning", body: morning },
-    { hour: 14, minute: 0, title: "Detox — check-in", body: midday },
-    { hour: 21, minute: 0, title: "Detox — evening", body: evening },
-  ];
-
-  const channel = Platform.OS === "android" ? "detox-default" : undefined;
-
-  for (const slot of slots) {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: slot.title,
-        body: slot.body,
-        sound: true,
-      },
-      trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.DAILY,
-        hour: slot.hour,
-        minute: slot.minute,
-        channelId: channel,
-      },
-    });
-  }
-
-  if (antiLazy) {
-    const moveSlots = [
-      {
-        hour: 12,
-        minute: 30,
-        title: "Stand up now",
-        body: "Anti-laziness: 2-min walk, stretch, or water. Move before you scroll.",
-      },
-      {
-        hour: 16,
-        minute: 0,
-        title: "Movement break",
-        body: "You've been still too long. Walk one room or 20 squats.",
-      },
+    const slots: {
+      hour: number;
+      minute: number;
+      title: string;
+      body: string;
+    }[] = [
+      { hour: 9, minute: 30, title: "Detox — morning", body: morning },
+      { hour: 14, minute: 0, title: "Detox — check-in", body: midday },
+      { hour: 21, minute: 0, title: "Detox — evening", body: evening },
     ];
-    for (const slot of moveSlots) {
+
+    const channel = Platform.OS === "android" ? "detox-default" : undefined;
+
+    for (const slot of slots) {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: slot.title,
@@ -160,5 +134,39 @@ export async function rescheduleSmartNotifications(): Promise<void> {
         },
       });
     }
+
+    if (antiLazy) {
+      const moveSlots = [
+        {
+          hour: 12,
+          minute: 30,
+          title: "Stand up now",
+          body: "Anti-laziness: 2-min walk, stretch, or water. Move before you scroll.",
+        },
+        {
+          hour: 16,
+          minute: 0,
+          title: "Movement break",
+          body: "You've been still too long. Walk one room or 20 squats.",
+        },
+      ];
+      for (const slot of moveSlots) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: slot.title,
+            body: slot.body,
+            sound: true,
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DAILY,
+            hour: slot.hour,
+            minute: slot.minute,
+            channelId: channel,
+          },
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("rescheduleSmartNotifications failed:", err);
   }
 }

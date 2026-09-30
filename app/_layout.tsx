@@ -7,7 +7,6 @@ import { useFonts } from "expo-font";
 import { Stack, usePathname, useRouter, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
-import Constants from "expo-constants";
 import { useEffect, useMemo, useRef } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import "react-native-gesture-handler";
@@ -81,26 +80,6 @@ function RootLayoutNavInner() {
   const { user, ready: authReady } = useAuth();
   const t = scheme === "light" ? colors.light : colors.dark;
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
-
-  useEffect(() => {
-    if (!(__DEV__ && Constants.appOwnership === "expo")) return;
-    const origError = console.error;
-    console.error = (...args: any[]) => {
-      const first = args[0];
-      if (
-        typeof first === "string" &&
-        first.includes(
-          "expo-notifications: Android Push notifications (remote notifications)",
-        )
-      ) {
-        return;
-      }
-      return origError(...args);
-    };
-    return () => {
-      console.error = origError;
-    };
-  }, []);
 
   useEffect(() => {
     if (!authReady || !user) return;

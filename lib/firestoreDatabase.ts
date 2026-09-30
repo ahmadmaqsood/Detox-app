@@ -91,28 +91,128 @@ function userRoot(uid: string) {
   };
 }
 
+function metaStateRef(db: ReturnType<typeof getFirestoreDb> extends infer T ? any : any, uid: string) {
+  return doc(db, "users", uid, "meta", "state");
+}
+
+async function migrateMetaDocsToState(uid: string): Promise<void> {
+  const { db } = userRoot(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
+  const stateSnap = await getDoc(stateRef);
+  const state = (stateSnap.data() as any) ?? {};
+
+  // Pull legacy meta docs (best-effort) and merge into the single state doc.
+  const legacyIds = [
+    "seeded",
+    "_counters",
+    "mode",
+    "detox_enabled",
+    "detox_started_at",
+    "hard_mode",
+    "focus_lock_enabled",
+    "onboarding_complete",
+    "last_active",
+    "user_level",
+    "insights",
+  ] as const;
+
+  const legacySnaps = await Promise.all(
+    legacyIds.map((id) => getDoc(doc(db, "users", uid, "meta", id))),
+  );
+
+  const patch: Record<string, unknown> = {};
+  // If state doc doesn't exist, we build a full state from legacy docs.
+  // If it exists, we only fill missing fields.
+  const setIfMissing = (key: string, value: unknown) => {
+    if (state[key] === undefined && value !== undefined) patch[key] = value;
+  };
+
+  for (let i = 0; i < legacyIds.length; i++) {
+    const id = legacyIds[i];
+    const snap = legacySnaps[i];
+    if (!snap.exists()) continue;
+    const data = snap.data() as any;
+    switch (id) {
+      case "seeded":
+        setIfMissing("seeded", { value: Boolean(data?.value), seededAt: data?.seededAt ?? null });
+        break;
+      case "_counters":
+        setIfMissing("counters", data ?? {});
+        break;
+      case "mode":
+        setIfMissing("mode", data?.currentMode ?? "hostel");
+        break;
+      case "detox_enabled":
+        setIfMissing("detox_enabled", Boolean(data?.value));
+        break;
+      case "detox_started_at":
+        setIfMissing("detox_started_at", data?.value ?? null);
+        break;
+      case "hard_mode":
+        setIfMissing("hard_mode", Boolean(data?.value));
+        break;
+      case "focus_lock_enabled":
+        setIfMissing("focus_lock_enabled", Boolean(data?.value));
+        break;
+      case "onboarding_complete":
+        setIfMissing("onboarding_complete", Boolean(data?.value));
+        break;
+      case "last_active":
+        setIfMissing("last_active_at", data?.at ?? null);
+        break;
+      case "user_level":
+        setIfMissing("user_level", data ?? {});
+        break;
+      case "insights":
+        setIfMissing("insights", data ?? {});
+        break;
+    }
+  }
+
+  if (!stateSnap.exists()) {
+    // Initialize defaults if missing.
+    if (patch.seeded === undefined) patch.seeded = { value: false, seededAt: null };
+    if (patch.counters === undefined) patch.counters = {};
+    if (patch.mode === undefined) patch.mode = "hostel";
+    if (patch.detox_enabled === undefined) patch.detox_enabled = false;
+    if (patch.hard_mode === undefined) patch.hard_mode = false;
+    if (patch.focus_lock_enabled === undefined) patch.focus_lock_enabled = false;
+    if (patch.onboarding_complete === undefined) patch.onboarding_complete = false;
+  }
+
+  if (Object.keys(patch).length > 0) {
+    await setDoc(stateRef, { ...patch, updatedAt: serverTimestamp() }, { merge: true });
+  }
+}
+
 async function allocId(uid: string, key: string): Promise<number> {
   const { db } = userRoot(uid);
-  const counterRef = doc(db, "users", uid, "meta", "_counters");
+  await migrateMetaDocsToState(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
   const field = `next_${key}`;
   return runTransaction(db, async (tx) => {
-    const snap = await tx.get(counterRef);
-    const cur = (snap.exists() ? (snap.data() as any)[field] : null) as number | null;
+    const snap = await tx.get(stateRef);
+    const data = (snap.data() as any) ?? {};
+    const counters = (data.counters ?? {}) as any;
+    const cur = (typeof counters[field] === "number" ? counters[field] : null) as number | null;
     const next = typeof cur === "number" ? cur + 1 : 1;
-    tx.set(counterRef, { [field]: next }, { merge: true });
+    tx.set(stateRef, { counters: { ...counters, [field]: next } }, { merge: true });
     return next;
   });
 }
 
 async function ensureSeeded(uid: string): Promise<void> {
   const { db } = userRoot(uid);
-  const seededRef = doc(db, "users", uid, "meta", "seeded");
-  const seeded = await getDoc(seededRef);
-  if (seeded.exists()) return;
+  await migrateMetaDocsToState(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
+  const stateSnap = await getDoc(stateRef);
+  const seededVal = Boolean((stateSnap.data() as any)?.seeded?.value);
+  if (seededVal) return;
 
   await runTransaction(db, async (tx) => {
-    const again = await tx.get(seededRef);
-    if (again.exists()) return;
+    const again = await tx.get(stateRef);
+    const againSeeded = Boolean((again.data() as any)?.seeded?.value);
+    if (againSeeded) return;
 
     // Seed habits with stable numeric ids.
     let i = 0;
@@ -168,15 +268,25 @@ async function ensureSeeded(uid: string): Promise<void> {
       });
     }
 
-    tx.set(doc(db, "users", uid, "meta", "_counters"), {
-      next_habit: defaultHabits.length,
-      next_intervention: 0,
-      next_urge_session: 0,
-      next_challenge_history: 0,
-    });
-    tx.set(seededRef, { value: true, seededAt: serverTimestamp() });
-    tx.set(doc(db, "users", uid, "meta", "mode"), { currentMode: "hostel" });
-    tx.set(doc(db, "users", uid, "meta", "detox_enabled"), { value: false });
+    const data = (again.data() as any) ?? {};
+    const counters = (data.counters ?? {}) as any;
+    tx.set(
+      stateRef,
+      {
+        seeded: { value: true, seededAt: serverTimestamp() },
+        mode: data.mode ?? "hostel",
+        detox_enabled: Boolean(data.detox_enabled ?? false),
+        counters: {
+          ...counters,
+          next_habit: defaultHabits.length,
+          next_intervention: 0,
+          next_urge_session: 0,
+          next_challenge_history: 0,
+        },
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
   });
 }
 
@@ -204,22 +314,25 @@ export async function recordLastActiveNow(): Promise<void> {
   if (!getFirebaseAuth()?.currentUser) return;
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "meta", "last_active"), { at: serverTimestamp() }, { merge: true });
+  await migrateMetaDocsToState(uid);
+  await setDoc(doc(db, "users", uid, "meta", "state"), { last_active_at: serverTimestamp() }, { merge: true });
 }
 
 export async function getFocusLockEnabled(): Promise<boolean> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const snap = await getDoc(doc(db, "users", uid, "meta", "focus_lock_enabled"));
-  return Boolean((snap.data() as any)?.value);
+  await migrateMetaDocsToState(uid);
+  const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+  return Boolean((snap.data() as any)?.focus_lock_enabled);
 }
 
 export async function setFocusLockEnabled(enabled: boolean): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
+  await migrateMetaDocsToState(uid);
   await setDoc(
-    doc(db, "users", uid, "meta", "focus_lock_enabled"),
-    { value: enabled, updatedAt: serverTimestamp() },
+    doc(db, "users", uid, "meta", "state"),
+    { focus_lock_enabled: enabled, updatedAt: serverTimestamp() },
     { merge: true },
   );
 }
@@ -250,8 +363,9 @@ export async function isOnboardingComplete(): Promise<boolean> {
   }
   const db = getFirestoreDb();
   if (!db) return false;
-  const snap = await getDoc(doc(db, "users", user.uid, "meta", "onboarding_complete"));
-  return Boolean((snap.data() as any)?.value);
+  await migrateMetaDocsToState(user.uid);
+  const snap = await getDoc(doc(db, "users", user.uid, "meta", "state"));
+  return Boolean((snap.data() as any)?.onboarding_complete);
 }
 
 /** Call after email/password sign-in if user finished onboarding before creating an account. */
@@ -260,9 +374,10 @@ export async function syncOnboardingFromLocalToFirestore(): Promise<void> {
   if (!(await getLocalOnboardingComplete())) return;
   const uid = await requireUid();
   const { db } = userRoot(uid);
+  await migrateMetaDocsToState(uid);
   await setDoc(
-    doc(db, "users", uid, "meta", "onboarding_complete"),
-    { value: true, at: serverTimestamp() },
+    doc(db, "users", uid, "meta", "state"),
+    { onboarding_complete: true, onboarding_completed_at: serverTimestamp() },
     { merge: true },
   );
 }
@@ -270,44 +385,50 @@ export async function syncOnboardingFromLocalToFirestore(): Promise<void> {
 export async function setOnboardingComplete(): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "meta", "onboarding_complete"), { value: true, at: serverTimestamp() });
+  await migrateMetaDocsToState(uid);
+  await setDoc(doc(db, "users", uid, "meta", "state"), { onboarding_complete: true, onboarding_completed_at: serverTimestamp() }, { merge: true });
 }
 
 export async function getMode(): Promise<Mode> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const snap = await getDoc(doc(db, "users", uid, "meta", "mode"));
-  const m = (snap.data() as any)?.currentMode;
+  await migrateMetaDocsToState(uid);
+  const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+  const m = (snap.data() as any)?.mode;
   return m === "home" || m === "hostel" ? m : "hostel";
 }
 
 export async function setMode(mode: Mode): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "meta", "mode"), { currentMode: mode, updatedAt: serverTimestamp() }, { merge: true });
+  await migrateMetaDocsToState(uid);
+  await setDoc(doc(db, "users", uid, "meta", "state"), { mode, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 export async function getDetoxEnabled(): Promise<boolean> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const snap = await getDoc(doc(db, "users", uid, "meta", "detox_enabled"));
-  return Boolean((snap.data() as any)?.value);
+  await migrateMetaDocsToState(uid);
+  const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+  return Boolean((snap.data() as any)?.detox_enabled);
 }
 
 export async function setDetoxEnabled(enabled: boolean): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "meta", "detox_enabled"), { value: enabled, updatedAt: serverTimestamp() }, { merge: true });
+  await migrateMetaDocsToState(uid);
+  await setDoc(doc(db, "users", uid, "meta", "state"), { detox_enabled: enabled, updatedAt: serverTimestamp() }, { merge: true });
   if (enabled) {
-    await setDoc(doc(db, "users", uid, "meta", "detox_started_at"), { value: todayISO() }, { merge: true });
+    await setDoc(doc(db, "users", uid, "meta", "state"), { detox_started_at: todayISO() }, { merge: true });
   }
 }
 
 export async function getDetoxStartDate(): Promise<string | null> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const snap = await getDoc(doc(db, "users", uid, "meta", "detox_started_at"));
-  return (snap.data() as any)?.value ?? null;
+  await migrateMetaDocsToState(uid);
+  const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+  return (snap.data() as any)?.detox_started_at ?? null;
 }
 
 export async function getDetoxStreak(): Promise<number> {
@@ -323,14 +444,16 @@ export async function getDetoxStreak(): Promise<number> {
 export async function getHardMode(): Promise<boolean> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const snap = await getDoc(doc(db, "users", uid, "meta", "hard_mode"));
-  return Boolean((snap.data() as any)?.value);
+  await migrateMetaDocsToState(uid);
+  const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+  return Boolean((snap.data() as any)?.hard_mode);
 }
 
 export async function setHardMode(enabled: boolean): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "meta", "hard_mode"), { value: enabled, updatedAt: serverTimestamp() }, { merge: true });
+  await migrateMetaDocsToState(uid);
+  await setDoc(doc(db, "users", uid, "meta", "state"), { hard_mode: enabled, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 export async function getHardModeStreak(): Promise<number> {
@@ -515,10 +638,11 @@ export async function toggleHabit(habitId: number): Promise<boolean> {
 async function updateUserProgressAfterToggle(completedNow: boolean): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const levelRef = doc(db, "users", uid, "meta", "user_level");
+  await migrateMetaDocsToState(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
   await runTransaction(db, async (tx) => {
-    const snap = await tx.get(levelRef);
-    const cur = (snap.data() as any)?.xp ?? 0;
+    const snap = await tx.get(stateRef);
+    const cur = (snap.data() as any)?.user_level?.xp ?? 0;
     const xp = Math.max(0, cur + (completedNow ? 8 : 0));
     const rank =
       xp >= 2000
@@ -528,7 +652,7 @@ async function updateUserProgressAfterToggle(completedNow: boolean): Promise<voi
           : xp >= 250
             ? "intermediate"
             : "beginner";
-    tx.set(levelRef, { xp, rank, updatedAt: serverTimestamp() }, { merge: true });
+    tx.set(stateRef, { user_level: { xp, rank, updatedAt: serverTimestamp() } }, { merge: true });
   });
 
   const streak = await getGlobalStreak();
@@ -1688,10 +1812,11 @@ async function persistInsightsMeta(uid: string): Promise<void> {
   const { db } = userRoot(uid);
   const day = todayISO();
   const sig = await getInsightSignals();
-  const metaRef = doc(db, "users", uid, "meta", "insights");
-  const prevSnap = await getDoc(metaRef);
-  const prev = prevSnap.data() as { daily?: Record<string, Record<string, number>> } | undefined;
-  const daily = { ...(prev?.daily ?? {}) };
+  await migrateMetaDocsToState(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
+  const prevSnap = await getDoc(stateRef);
+  const prev = prevSnap.data() as { insights?: { daily?: Record<string, Record<string, number>> } } | undefined;
+  const daily = { ...(prev?.insights?.daily ?? {}) };
   daily[day] = {
     homeRate: sig.homeRate,
     hostelRate: sig.hostelRate,
@@ -1707,28 +1832,31 @@ async function persistInsightsMeta(uid: string): Promise<void> {
     delete daily[k];
   }
   await setDoc(
-    metaRef,
+    stateRef,
     {
       updatedAt: serverTimestamp(),
-      lastComputedDay: day,
-      latest: {
-        metricsDaysWithData: sig.metricsDaysWithData,
-        avgScreenOnRelapseDays: sig.avgScreenOnRelapseDays,
-        avgScreenOnCleanDays: sig.avgScreenOnCleanDays,
-        relapseDaysHighScreen: sig.relapseDaysHighScreen,
-        totalRelapseDays: sig.totalRelapseDays,
-        homeRate: sig.homeRate,
-        hostelRate: sig.hostelRate,
-        homeTotal: sig.homeTotal,
-        hostelTotal: sig.hostelTotal,
-        heatmapLast7Avg: sig.heatmapLast7Avg,
-        heatmapPrior7Avg: sig.heatmapPrior7Avg,
-        currentStreak: sig.currentStreak,
-        longestStreak: sig.longestStreak,
-        todayDone: sig.todayDone,
-        todayTotal: sig.todayTotal,
+      insights: {
+        updatedAt: serverTimestamp(),
+        lastComputedDay: day,
+        latest: {
+          metricsDaysWithData: sig.metricsDaysWithData,
+          avgScreenOnRelapseDays: sig.avgScreenOnRelapseDays,
+          avgScreenOnCleanDays: sig.avgScreenOnCleanDays,
+          relapseDaysHighScreen: sig.relapseDaysHighScreen,
+          totalRelapseDays: sig.totalRelapseDays,
+          homeRate: sig.homeRate,
+          hostelRate: sig.hostelRate,
+          homeTotal: sig.homeTotal,
+          hostelTotal: sig.hostelTotal,
+          heatmapLast7Avg: sig.heatmapLast7Avg,
+          heatmapPrior7Avg: sig.heatmapPrior7Avg,
+          currentStreak: sig.currentStreak,
+          longestStreak: sig.longestStreak,
+          todayDone: sig.todayDone,
+          todayTotal: sig.todayTotal,
+        },
+        daily,
       },
-      daily,
     },
     { merge: true },
   );
