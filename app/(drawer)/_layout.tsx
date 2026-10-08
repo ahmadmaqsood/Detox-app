@@ -36,6 +36,11 @@ const DRAWER_ITEMS: DrawerItem[] = [
     icon: { ios: "sun.max.fill", material: "weather-sunny" },
   },
   {
+    label: "Habits",
+    route: "/(drawer)/habits",
+    icon: { ios: "checklist", material: "format-list-checks" },
+  },
+  {
     label: "Life Hub",
     route: "/(drawer)/lifeDashboard",
     icon: { ios: "circle.grid.cross.fill", material: "view-dashboard" },
@@ -336,6 +341,10 @@ export default function DrawerLayout() {
       />
       <Drawer.Screen
         name="diet"
+        options={{ drawerItemStyle: { display: "none" } }}
+      />
+      <Drawer.Screen
+        name="habits"
         options={{ drawerItemStyle: { display: "none" } }}
       />
     </Drawer>

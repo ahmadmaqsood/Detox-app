@@ -6,6 +6,8 @@ import type {
   ChallengeCompletionRecord,
   ChallengeStats,
   ChatMessage,
+  DailyHabitEntry,
+  DailyProgressEntry,
   Habit,
   HabitIcon,
   LifeArea,
@@ -23,13 +25,13 @@ import {
   orderBy,
   query,
   runTransaction,
-  startAfter,
   serverTimestamp,
   setDoc,
+  startAfter,
+  Timestamp,
   updateDoc,
   where,
   type DocumentReference,
-  Timestamp,
 } from "firebase/firestore";
 
 function todayISO(): string {
@@ -307,7 +309,7 @@ export async function initDB(): Promise<void> {
   // Best-effort achievements sync on launch
   import("@/lib/firestoreAchievements")
     .then((m) => m.syncFirestoreAchievements())
-    .catch(() => {});
+    .catch(() => { });
 }
 
 export async function recordLastActiveNow(): Promise<void> {
@@ -457,23 +459,24 @@ export async function setHardMode(enabled: boolean): Promise<void> {
 }
 
 export async function getHardModeStreak(): Promise<number> {
-  // Same as mode streak but across both modes (≥50% of all habits).
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const habitsSnap = await getDocs(query(collection(db, "users", uid, "habits")));
-  const habitIds = habitsSnap.docs.map((d) => (d.data() as any).id as number);
-  if (habitIds.length === 0) return 0;
+  const habitCount = habitsSnap.docs.filter((d) => (d.data() as any)?.deleted !== true).length;
+  if (habitCount === 0) return 0;
 
   let streak = 0;
   const cursor = new Date();
   cursor.setHours(0, 0, 0, 0);
   while (true) {
     const day = cursor.toISOString().slice(0, 10);
-    const docsSnap = await Promise.all(
-      habitIds.map((hid) => getDoc(doc(db, "users", uid, "entries", `${hid}_${day}`))),
-    );
-    const done = docsSnap.filter((s) => (s.data() as any)?.completed === true).length;
-    if (done / habitIds.length < 0.5) break;
+    const dayDoc = await getDoc(doc(db, "users", uid, "entries", day));
+    if (!dayDoc.exists()) break;
+    const data = dayDoc.data() as any;
+    const rate = typeof data.completionPercentage === "number"
+      ? data.completionPercentage / 100
+      : (data.completedCount ?? 0) / habitCount;
+    if (rate < 0.5) break;
     streak++;
     cursor.setDate(cursor.getDate() - 1);
   }
@@ -512,14 +515,25 @@ export async function addHabit(
   return id;
 }
 
-export async function getAllHabits(): Promise<Habit[]> {
+export async function getAllHabits(mode?: Mode): Promise<Habit[]> {
   const uid = await requireUid();
   await ensureSeeded(uid);
   const { db } = userRoot(uid);
   const snap = await getDocs(
-    query(collection(db, "users", uid, "habits"), orderBy("mode", "asc"), orderBy("sortOrder", "asc"), orderBy("createdAt", "desc")),
+    query(
+      collection(db, "users", uid, "habits"),
+      orderBy("mode", "asc"),
+      orderBy("sortOrder", "asc"),
+      orderBy("createdAt", "desc"),
+    ),
   );
-  return snap.docs.map((d) => d.data() as Habit);
+  const active = snap.docs
+    .map((d) => d.data() as Habit & { deleted?: boolean })
+    .filter((h) => h?.deleted !== true) as Habit[];
+  if (mode) {
+    return active.filter((h) => h.mode === mode);
+  }
+  return active;
 }
 
 export async function getHabitById(id: number): Promise<Habit | null> {
@@ -553,6 +567,31 @@ export async function deleteHabit(id: number): Promise<void> {
   await setDoc(doc(db, "users", uid, "habits", String(id)), { deleted: true, deletedAt: serverTimestamp() }, { merge: true });
 }
 
+export function getMotivationalMessage(percentage: number, pendingCount: number): string {
+  if (percentage === 100) {
+    return "Outstanding discipline! You completed 100% of your habits today. Pure mastery!";
+  }
+  if (percentage >= 80) {
+    return `Almost at the finish line! ${percentage}% completed. Just ${pendingCount} more habit${pendingCount === 1 ? "" : "s"} left to conquer today!`;
+  }
+  if (percentage >= 50) {
+    return `Great momentum! You're over halfway there at ${percentage}%. Put in that extra effort for the remaining ${pendingCount} habit${pendingCount === 1 ? "" : "s"}!`;
+  }
+  if (percentage > 0) {
+    return `Good start at ${percentage}%! Build on this momentum—push forward to complete ${pendingCount} more habit${pendingCount === 1 ? "" : "s"} today!`;
+  }
+  return "The journey begins with a single step. Complete your first habit today to get the momentum going!";
+}
+
+export async function getDailyEntry(date?: string): Promise<DailyProgressEntry | null> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const day = date ?? todayISO();
+  const snap = await getDoc(doc(db, "users", uid, "entries", day));
+  if (!snap.exists()) return null;
+  return snap.data() as DailyProgressEntry;
+}
+
 export async function getTodayHabits(mode?: Mode): Promise<(Habit & { completed: number })[]> {
   const uid = await requireUid();
   await ensureSeeded(uid);
@@ -561,77 +600,141 @@ export async function getTodayHabits(mode?: Mode): Promise<(Habit & { completed:
 
   const habitsQ = mode
     ? query(
-        collection(db, "users", uid, "habits"),
-        where("mode", "==", mode),
-        orderBy("sortOrder", "asc"),
-        orderBy("createdAt", "asc"),
-      )
+      collection(db, "users", uid, "habits"),
+      where("mode", "==", mode),
+      orderBy("sortOrder", "asc"),
+      orderBy("createdAt", "asc"),
+    )
     : query(
-        collection(db, "users", uid, "habits"),
-        orderBy("sortOrder", "asc"),
-        orderBy("createdAt", "asc"),
-      );
+      collection(db, "users", uid, "habits"),
+      orderBy("sortOrder", "asc"),
+      orderBy("createdAt", "asc"),
+    );
 
   const habitsSnap = await getDocs(habitsQ);
   const habits = habitsSnap.docs
     .map((d) => d.data() as any)
     .filter((h) => h?.deleted !== true) as Habit[];
 
+  // Read the single daily document for today
+  const dayDoc = await getDoc(doc(db, "users", uid, "entries", day));
+  const dayData = dayDoc.exists() ? (dayDoc.data() as any) : null;
+  const dayHabitsMap = new Map<number, boolean>();
+  if (Array.isArray(dayData?.habits)) {
+    for (const h of dayData.habits) {
+      if (h?.id != null) dayHabitsMap.set(Number(h.id), Boolean(h.completed));
+    }
+  }
+
   const entries = await Promise.all(
     habits.map(async (h) => {
-      const eId = `${h.id}_${day}`;
-      const eSnap = await getDoc(doc(db, "users", uid, "entries", eId));
-      const completed = (eSnap.data() as any)?.completed ? 1 : 0;
-      return { ...h, completed };
+      let isCompleted = dayHabitsMap.get(h.id);
+      if (isCompleted === undefined) {
+        // Fallback for legacy single-habit docs if any exist
+        const eSnap = await getDoc(doc(db, "users", uid, "entries", `${h.id}_${day}`));
+        isCompleted = Boolean((eSnap.data() as any)?.completed);
+      }
+      return { ...h, completed: isCompleted ? 1 : 0 };
     }),
   );
 
   return entries;
 }
 
-export async function toggleHabit(habitId: number): Promise<boolean> {
+export async function toggleHabit(habitId: number, targetDate?: string, activeMode?: Mode): Promise<boolean> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const day = todayISO();
-  const entryId = `${habitId}_${day}`;
-  const ref = doc(db, "users", uid, "entries", entryId);
-  const trackingId = `${habitId}_${day}`;
-  const trackingRef = doc(db, "users", uid, "habit_daily_tracking_progress", trackingId);
+  const day = targetDate ?? todayISO();
+  const entryRef = doc(db, "users", uid, "entries", day);
   const toggledAt = new Date().toISOString();
 
+  // Load all user habits so we have full names, modes, and total counts
+  const habitsSnap = await getDocs(collection(db, "users", uid, "habits"));
+  const allHabits = habitsSnap.docs
+    .map((d) => d.data() as any)
+    .filter((h) => h?.deleted !== true)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+
+  const targetHabit = allHabits.find((h) => h.id === habitId);
+  const habitName = targetHabit?.name ?? `Habit #${habitId}`;
+
+  // Mode: prioritize activeMode -> targetHabit.mode -> getMode()
+  const currentMode: Mode = activeMode ?? (targetHabit?.mode as Mode | undefined) ?? (await getMode());
+
+  // Filter habits for the active mode only
+  const modeHabits = allHabits.filter((h) => (h.mode ?? "home") === currentMode);
+
   const next = await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref);
-    const prev = (snap.data() as any)?.completed === true;
-    const next = !prev;
+    // 1. Read single daily document
+    const entrySnap = await tx.get(entryRef);
+    const existingData = entrySnap.exists() ? (entrySnap.data() as any) : null;
+    const existingHabitsList: DailyHabitEntry[] = Array.isArray(existingData?.habits) ? existingData.habits : [];
+
+    const existingMap = new Map<number, {
+      completed: boolean;
+      time?: string | null;
+    }>();
+    for (const eh of existingHabitsList) {
+      if (eh?.id != null) {
+        existingMap.set(Number(eh.id), {
+          completed: Boolean(eh.completed),
+          time: eh.time ?? null,
+        });
+      }
+    }
+
+    // Determine target habit toggle state
+    const currentEntry = existingMap.get(habitId);
+    const nextCompleted = currentEntry ? !currentEntry.completed : true;
+
+    // Build consolidated array of habit objects for current mode
+    const updatedHabits: DailyHabitEntry[] = modeHabits.map((h) => {
+      const hid = Number(h.id);
+      if (hid === habitId) {
+        return {
+          id: hid,
+          name: h.name ?? habitName,
+          completed: nextCompleted,
+          time: nextCompleted ? toggledAt : null,
+        };
+      }
+      const existing = existingMap.get(hid);
+      return {
+        id: hid,
+        name: h.name ?? `Habit #${hid}`,
+        completed: existing?.completed ?? false,
+        time: existing?.time ?? null,
+      };
+    });
+
+    // Root-level metrics
+    const totalHabits = modeHabits.length;
+    const checkedHabits = updatedHabits.filter((h) => h.completed).length;
+    const leftHabits = Math.max(0, totalHabits - checkedHabits);
+    const completionPercentage = totalHabits > 0 ? Math.round((checkedHabits / totalHabits) * 100) : 0;
+    const motivationalMessage = getMotivationalMessage(completionPercentage, leftHabits);
+
+    // 2. Write single document in entries for this date
     tx.set(
-      ref,
+      entryRef,
       {
-        habitId,
         date: day,
-        completed: next,
+        mode: currentMode,
+        totalHabits,
+        checkedHabits,
+        leftHabits,
+        completionPercentage,
+        motivationalMessage,
+        habits: updatedHabits,
         updatedAt: serverTimestamp(),
       },
-      { merge: true },
     );
 
-    const trSnap = await tx.get(trackingRef);
-    const prevHist = ((trSnap.data() as any)?.toggleHistory ?? []) as { at: string; completed: boolean }[];
-    const toggleHistory = [...prevHist, { at: toggledAt, completed: next }].slice(-50);
-    tx.set(
-      trackingRef,
-      {
-        habitId,
-        date: day,
-        completed: next,
-        updatedAt: serverTimestamp(),
-        toggleHistory,
-      },
-      { merge: true },
-    );
-    return next;
+    return nextCompleted;
   });
+
   // Update user progression + monthly achievements (best-effort).
-  updateUserProgressAfterToggle(next).catch(() => {});
+  updateUserProgressAfterToggle(next).catch(() => { });
   return next;
 }
 
@@ -697,13 +800,13 @@ export async function getHabitHistory(
   from.setDate(from.getDate() - days + 1);
   const fromISO = from.toISOString().slice(0, 10);
 
-  // Pull all entries for this habit in range (both completed and not).
+  // Read single daily documents in range
   const snaps = await Promise.all(
     Array.from({ length: days }, (_, i) => {
       const d = new Date(fromISO + "T00:00:00");
       d.setDate(d.getDate() + i);
       const iso = d.toISOString().slice(0, 10);
-      return getDoc(doc(db, "users", uid, "entries", `${habitId}_${iso}`));
+      return getDoc(doc(db, "users", uid, "entries", iso));
     }),
   );
   const out: { date: string; completed: number }[] = [];
@@ -711,35 +814,65 @@ export async function getHabitHistory(
     const d = new Date(fromISO + "T00:00:00");
     d.setDate(d.getDate() + i);
     const iso = d.toISOString().slice(0, 10);
-    const completed = (snaps[i].data() as any)?.completed === true ? 1 : 0;
+    const dayData = snaps[i].exists() ? (snaps[i].data() as any) : null;
+    let completed = 0;
+    if (Array.isArray(dayData?.habits)) {
+      const found = dayData.habits.find((h: any) => h.id === habitId);
+      completed = found?.completed ? 1 : 0;
+    } else {
+      // Legacy doc fallback
+      const legSnap = await getDoc(doc(db, "users", uid, "entries", `${habitId}_${iso}`));
+      completed = (legSnap.data() as any)?.completed === true ? 1 : 0;
+    }
     if (iso >= fromISO && iso <= to) out.push({ date: iso, completed });
   }
   return out.sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
+async function getCompletedDatesForHabit(uid: string, habitId: number): Promise<string[]> {
+  const { db } = userRoot(uid);
+  const snap = await getDocs(collection(db, "users", uid, "entries"));
+  const dates = new Set<string>();
+  for (const d of snap.docs) {
+    const data = d.data() as any;
+    const date = data.date || d.id;
+    if (typeof date !== "string") continue;
+    if (Array.isArray(data.habits)) {
+      if (data.habits.some((h: any) => h.id === habitId && h.completed)) {
+        dates.add(date);
+      }
+    } else if (data.habitId === habitId && data.completed) {
+      dates.add(date);
+    }
+  }
+  return Array.from(dates);
+}
+
 export async function getHabitCompletionRate(habitId: number): Promise<number> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const qy = query(collection(db, "users", uid, "entries"), where("habitId", "==", habitId));
-  const snap = await getDocs(qy);
-  if (snap.size === 0) return 0;
-  const done = snap.docs.filter((d) => (d.data() as any)?.completed === true).length;
-  return Math.round((done / snap.size) * 100);
+  const snap = await getDocs(collection(db, "users", uid, "entries"));
+  let totalDays = 0;
+  let completedDays = 0;
+  for (const d of snap.docs) {
+    const data = d.data() as any;
+    if (Array.isArray(data.habits)) {
+      totalDays++;
+      if (data.habits.some((h: any) => h.id === habitId && h.completed)) {
+        completedDays++;
+      }
+    } else if (data.habitId === habitId) {
+      totalDays++;
+      if (data.completed) completedDays++;
+    }
+  }
+  if (totalDays === 0) return 0;
+  return Math.round((completedDays / totalDays) * 100);
 }
 
 export async function getStreak(habitId: number): Promise<number> {
   const uid = await requireUid();
-  const { db } = userRoot(uid);
-  const qy = query(
-    collection(db, "users", uid, "entries"),
-    where("habitId", "==", habitId),
-    where("completed", "==", true),
-    orderBy("date", "desc"),
-    limit(400),
-  );
-  const snap = await getDocs(qy);
-  if (snap.size === 0) return 0;
-  const rows = snap.docs.map((d) => (d.data() as any).date as string);
+  const rows = await getCompletedDatesForHabit(uid, habitId);
   const dateSet = new Set(rows);
 
   let streak = 0;
@@ -756,27 +889,18 @@ export async function getStreak(habitId: number): Promise<number> {
 
 export async function getLongestStreak(habitId: number): Promise<number> {
   const uid = await requireUid();
-  const { db } = userRoot(uid);
-  const qy = query(
-    collection(db, "users", uid, "entries"),
-    where("habitId", "==", habitId),
-    where("completed", "==", true),
-    orderBy("date", "asc"),
-    limit(8000),
-  );
-  const snap = await getDocs(qy);
-  const rows = snap.docs.map((d) => (d.data() as any).date as string);
+  const rows = (await getCompletedDatesForHabit(uid, habitId)).sort();
   if (rows.length === 0) return 0;
   let longest = 1;
   let current = 1;
   for (let i = 1; i < rows.length; i++) {
     const prev = new Date(rows[i - 1] + "T00:00:00");
     const cur = new Date(rows[i] + "T00:00:00");
-    const diff = (cur.getTime() - prev.getTime()) / 86_400_000;
+    const diff = Math.round((cur.getTime() - prev.getTime()) / 86_400_000);
     if (diff === 1) {
       current++;
       longest = Math.max(longest, current);
-    } else {
+    } else if (diff > 1) {
       current = 1;
     }
   }
@@ -788,12 +912,14 @@ export async function getModeStreak(mode: Mode): Promise<number> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
 
-  // Current habits in this mode (used as denominator for now).
   const habitsSnap = await getDocs(
     query(collection(db, "users", uid, "habits"), where("mode", "==", mode)),
   );
-  const habitIds = habitsSnap.docs.map((d) => (d.data() as any).id as number);
-  if (habitIds.length === 0) return 0;
+  const modeHabits = habitsSnap.docs
+    .map((d) => d.data() as any)
+    .filter((h) => h?.deleted !== true);
+  if (modeHabits.length === 0) return 0;
+  const modeHabitIds = new Set(modeHabits.map((h) => h.id as number));
 
   let streak = 0;
   const cursor = new Date();
@@ -801,11 +927,14 @@ export async function getModeStreak(mode: Mode): Promise<number> {
 
   while (true) {
     const day = cursor.toISOString().slice(0, 10);
-    const docsSnap = await Promise.all(
-      habitIds.map((hid) => getDoc(doc(db, "users", uid, "entries", `${hid}_${day}`))),
-    );
-    const done = docsSnap.filter((s) => (s.data() as any)?.completed === true).length;
-    if (done / habitIds.length < 0.5) break;
+    const dayDoc = await getDoc(doc(db, "users", uid, "entries", day));
+    if (!dayDoc.exists()) break;
+    const data = dayDoc.data() as any;
+    let done = 0;
+    if (Array.isArray(data.habits)) {
+      done = data.habits.filter((h: any) => modeHabitIds.has(h.id) && h.completed).length;
+    }
+    if (done / modeHabits.length < 0.5) break;
     streak++;
     cursor.setDate(cursor.getDate() - 1);
   }
@@ -860,45 +989,34 @@ export async function getGlobalStreak(): Promise<number> {
 export async function getGlobalLongestStreak(): Promise<number> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const habitsSnap = await getDocs(query(collection(db, "users", uid, "habits")));
-  const totalHabits = habitsSnap.size;
-  if (totalHabits === 0) return 0;
-
-  // Pull completed entries for recent history and compute day-level completion rates.
-  const completedQ = query(
-    collection(db, "users", uid, "entries"),
-    where("completed", "==", true),
-    orderBy("date", "asc"),
-    limit(8000),
-  );
-  const snap = await getDocs(completedQ);
-  const doneByDate = new Map<string, number>();
+  const snap = await getDocs(collection(db, "users", uid, "entries"));
+  const qualifyingDates: string[] = [];
   for (const d of snap.docs) {
-    const date = (d.data() as any).date as string;
-    doneByDate.set(date, (doneByDate.get(date) ?? 0) + 1);
+    const data = d.data() as any;
+    const date = data.date || d.id;
+    if (typeof date !== "string") continue;
+    const rate = typeof data.completionPercentage === "number"
+      ? data.completionPercentage / 100
+      : ((data.completedCount ?? 0) / Math.max(1, data.totalHabits ?? 1));
+    if (rate >= 0.5) {
+      qualifyingDates.push(date);
+    }
   }
+  qualifyingDates.sort();
+  if (qualifyingDates.length === 0) return 0;
 
-  const dates = Array.from(doneByDate.keys()).sort();
-  if (dates.length === 0) return 0;
-
-  let longest = 0;
-  let current = 0;
-  let prev: Date | null = null;
-  for (const iso of dates) {
-    const done = doneByDate.get(iso) ?? 0;
-    const rate = done / totalHabits;
-    const d = new Date(iso + "T00:00:00");
-    const consecutive = prev ? (d.getTime() - prev.getTime()) / 86_400_000 === 1 : true;
-    if (rate >= 0.5 && consecutive) {
+  let longest = 1;
+  let current = 1;
+  for (let i = 1; i < qualifyingDates.length; i++) {
+    const prev = new Date(qualifyingDates[i - 1] + "T00:00:00");
+    const cur = new Date(qualifyingDates[i] + "T00:00:00");
+    const diff = Math.round((cur.getTime() - prev.getTime()) / 86_400_000);
+    if (diff === 1) {
       current++;
       longest = Math.max(longest, current);
-    } else if (rate >= 0.5) {
+    } else if (diff > 1) {
       current = 1;
-      longest = Math.max(longest, current);
-    } else {
-      current = 0;
     }
-    prev = d;
   }
   return longest;
 }
@@ -906,38 +1024,35 @@ export async function getGlobalLongestStreak(): Promise<number> {
 export async function getHeatmapData(days: number = 49): Promise<{ date: string; rate: number }[]> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const habitsSnap = await getDocs(query(collection(db, "users", uid, "habits")));
-  const totalHabits = habitsSnap.size;
   const to = todayISO();
   const from = new Date();
   from.setDate(from.getDate() - days + 1);
   const fromISO = from.toISOString().slice(0, 10);
 
-  const completedQ = query(
-    collection(db, "users", uid, "entries"),
-    where("completed", "==", true),
-    where("date", ">=", fromISO),
-    where("date", "<=", to),
-  );
-  const snap = await getDocs(completedQ);
-  const doneByDate = new Map<string, number>();
+  const snap = await getDocs(collection(db, "users", uid, "entries"));
+  const rateByDate = new Map<string, number>();
   for (const d of snap.docs) {
-    const date = (d.data() as any).date as string;
-    doneByDate.set(date, (doneByDate.get(date) ?? 0) + 1);
+    const data = d.data() as any;
+    const date = data.date || d.id;
+    if (typeof date === "string" && date >= fromISO && date <= to) {
+      const rate = typeof data.completionPercentage === "number"
+        ? Math.min(1, Math.max(0, data.completionPercentage / 100))
+        : 0;
+      rateByDate.set(date, rate);
+    }
   }
 
   const result: { date: string; rate: number }[] = [];
-  const cursor = new Date(fromISO + "T00:00:00");
+  let cursor = new Date(fromISO + "T00:00:00");
   const end = new Date(to + "T00:00:00");
   while (cursor <= end) {
     const iso = cursor.toISOString().slice(0, 10);
-    const done = doneByDate.get(iso) ?? 0;
-    const rate = totalHabits > 0 ? done / totalHabits : 0;
-    result.push({ date: iso, rate });
-    cursor.setDate(cursor.getDate() + 1);
+    result.push({ date: iso, rate: rateByDate.get(iso) ?? 0 });
+    cursor = new Date(cursor.getTime() + 86_400_000);
   }
   return result;
 }
+
 
 export async function getWeeklyStats(weeks: number = 4): Promise<PeriodStats[]> {
   const heat = await getHeatmapData(weeks * 7);
@@ -995,19 +1110,25 @@ export async function getModeComparisonStats(): Promise<ModeComparison[]> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const habitsSnap = await getDocs(query(collection(db, "users", uid, "habits")));
-  const habits = habitsSnap.docs.map((d) => d.data() as Habit);
-  const homeIds = habits.filter((h) => h.mode === "home").map((h) => h.id);
-  const hostelIds = habits.filter((h) => h.mode === "hostel").map((h) => h.id);
+  const habits = habitsSnap.docs
+    .map((d) => d.data() as Habit)
+    .filter((h) => (h as any)?.deleted !== true);
+  const homeHabits = habits.filter((h) => h.mode === "home");
+  const hostelHabits = habits.filter((h) => h.mode === "hostel");
   const day = todayISO();
 
-  const doneCount = async (ids: number[]) => {
-    const snaps = await Promise.all(ids.map((hid) => getDoc(doc(db, "users", uid, "entries", `${hid}_${day}`))));
-    return snaps.filter((s) => (s.data() as any)?.completed === true).length;
-  };
+  const dayDoc = await getDoc(doc(db, "users", uid, "entries", day));
+  const dayData = dayDoc.exists() ? (dayDoc.data() as any) : null;
+  const habitsArray = Array.isArray(dayData?.habits) ? dayData.habits : [];
+  const completedIdSet = new Set(
+    habitsArray.filter((h: any) => h.completed).map((h: any) => h.id),
+  );
 
-  const [homeDone, hostelDone] = await Promise.all([doneCount(homeIds), doneCount(hostelIds)]);
-  const homeTotal = homeIds.length;
-  const hostelTotal = hostelIds.length;
+  const homeDone = homeHabits.filter((h) => completedIdSet.has(h.id)).length;
+  const hostelDone = hostelHabits.filter((h) => completedIdSet.has(h.id)).length;
+  const homeTotal = homeHabits.length;
+  const hostelTotal = hostelHabits.length;
+
   return [
     { mode: "home", total: homeTotal, done: homeDone, rate: homeTotal ? Math.round((homeDone / homeTotal) * 100) : 0 },
     { mode: "hostel", total: hostelTotal, done: hostelDone, rate: hostelTotal ? Math.round((hostelDone / hostelTotal) * 100) : 0 },
@@ -1530,7 +1651,13 @@ export async function logRelapseEvent(opts: { triggerTag: string; note?: string 
   const day = todayISO();
   const hour = now.getHours();
   const evRef = doc(collection(db, "users", uid, "relapse_events"));
+  const mRef = doc(db, "users", uid, "metrics_daily", day);
   await runTransaction(db, async (tx) => {
+    // 1. Reads before writes
+    const mSnap = await tx.get(mRef);
+    const prev = mSnap.data() as Record<string, unknown> | undefined;
+
+    // 2. Writes
     tx.set(evRef, {
       occurredAt: serverTimestamp(),
       date: day,
@@ -1544,9 +1671,6 @@ export async function logRelapseEvent(opts: { triggerTag: string; note?: string 
       { date: day, updatedAt: serverTimestamp() },
       { merge: true },
     );
-    const mRef = doc(db, "users", uid, "metrics_daily", day);
-    const mSnap = await tx.get(mRef);
-    const prev = mSnap.data() as Record<string, unknown> | undefined;
     tx.set(
       mRef,
       {
@@ -1683,12 +1807,23 @@ export async function getLifeAreaBalance(days = 7): Promise<LifeAreaBalanceRow[]
     query(collection(db, "users", uid, "entries"), orderBy(documentId())),
     async (docs) => {
       for (const d of docs) {
-        const e = d.data() as { habitId?: number; completed?: boolean; date?: string };
-        if (typeof e.habitId !== "number" || !e.date || e.date < from || e.date > to) continue;
-        const row = byHabit.get(e.habitId) ?? { total: 0, done: 0 };
-        row.total += 1;
-        if (e.completed) row.done += 1;
-        byHabit.set(e.habitId, row);
+        const e = d.data() as any;
+        const date = e.date || d.id;
+        if (!date || date < from || date > to) continue;
+        if (Array.isArray(e.habits)) {
+          for (const h of e.habits) {
+            if (typeof h?.id !== "number") continue;
+            const row = byHabit.get(h.id) ?? { total: 0, done: 0 };
+            row.total += 1;
+            if (h.completed) row.done += 1;
+            byHabit.set(h.id, row);
+          }
+        } else if (typeof e.habitId === "number") {
+          const row = byHabit.get(e.habitId) ?? { total: 0, done: 0 };
+          row.total += 1;
+          if (e.completed) row.done += 1;
+          byHabit.set(e.habitId, row);
+        }
       }
     },
   );
@@ -1726,16 +1861,29 @@ export async function getWeekdayWeekendCompletion(): Promise<WeekdayWeekendStats
     query(collection(db, "users", uid, "entries"), orderBy(documentId())),
     async (docs) => {
       for (const d of docs) {
-        const e = d.data() as { date?: string; completed?: boolean };
-        if (!e.date) continue;
-        const w = new Date(e.date + "T12:00:00").getDay();
+        const e = d.data() as any;
+        const date = e.date || d.id;
+        if (!date) continue;
+        const w = new Date(date + "T12:00:00").getDay();
         const weekend = w === 0 || w === 6;
-        if (weekend) {
-          weekendTotal += 1;
-          if (e.completed) weekendDone += 1;
-        } else {
-          weekdayTotal += 1;
-          if (e.completed) weekdayDone += 1;
+        if (Array.isArray(e.habits)) {
+          const total = e.habits.length;
+          const done = e.habits.filter((h: any) => h.completed).length;
+          if (weekend) {
+            weekendTotal += total;
+            weekendDone += done;
+          } else {
+            weekdayTotal += total;
+            weekdayDone += done;
+          }
+        } else if (e.date) {
+          if (weekend) {
+            weekendTotal += 1;
+            if (e.completed) weekendDone += 1;
+          } else {
+            weekdayTotal += 1;
+            if (e.completed) weekdayDone += 1;
+          }
         }
       }
     },
@@ -1759,13 +1907,20 @@ export async function getMostMissedHabit(): Promise<{ name: string; missed: numb
     habitNames.set(h.id, h.name);
   }
   const snap = await getDocs(
-    query(collection(db, "users", uid, "entries"), where("completed", "==", false), limit(8000)),
+    query(collection(db, "users", uid, "entries"), limit(8000)),
   );
   const missedBy = new Map<number, number>();
   for (const d of snap.docs) {
-    const e = d.data() as { habitId?: number };
-    if (typeof e.habitId !== "number") continue;
-    missedBy.set(e.habitId, (missedBy.get(e.habitId) ?? 0) + 1);
+    const e = d.data() as any;
+    if (Array.isArray(e.habits)) {
+      for (const h of e.habits) {
+        if (!h.completed) {
+          missedBy.set(h.id, (missedBy.get(h.id) ?? 0) + 1);
+        }
+      }
+    } else if (typeof e.habitId === "number" && !e.completed) {
+      missedBy.set(e.habitId, (missedBy.get(e.habitId) ?? 0) + 1);
+    }
   }
   let best: { id: number; n: number } | null = null;
   for (const [hid, n] of missedBy) {
@@ -1793,18 +1948,31 @@ export async function getMemberSinceYear(): Promise<number | null> {
   return Number.isFinite(y) ? y : null;
 }
 
-/** Per-habit per-day toggle timeline (see `toggleHabit`). */
+/** Per-habit per-day tracking progress. */
 export async function getHabitDailyTrackingProgress(
   habitId: number,
   date: string,
-): Promise<{ toggleHistory?: { at: string; completed: boolean }[]; completed?: boolean } | null> {
+): Promise<{ completed?: boolean; time?: string | null } | null> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const snap = await getDoc(
-    doc(db, "users", uid, "habit_daily_tracking_progress", `${habitId}_${date}`),
+    doc(db, "users", uid, "entries", date),
   );
-  if (!snap.exists()) return null;
-  return snap.data() as { toggleHistory?: { at: string; completed: boolean }[]; completed?: boolean };
+  if (!snap.exists()) {
+    // Legacy fallback
+    const legSnap = await getDoc(
+      doc(db, "users", uid, "habit_daily_tracking_progress", `${habitId}_${date}`),
+    );
+    if (!legSnap.exists()) return null;
+    return legSnap.data() as { completed?: boolean; time?: string | null };
+  }
+  const data = snap.data() as any;
+  const habit = Array.isArray(data?.habits) ? data.habits.find((h: any) => h.id === habitId) : null;
+  if (!habit) return null;
+  return {
+    completed: habit.completed,
+    time: habit.time ?? null,
+  };
 }
 
 /** Persists latest insight signals + rolling daily map under `meta/insights`. */

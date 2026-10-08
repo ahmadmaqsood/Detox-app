@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
@@ -125,6 +126,8 @@ export default function HabitDetailScreen() {
   const [completion, setCompletion] = useState(0);
   const [history, setHistory] = useState<{ date: string; completed: number }[]>([]);
   const [editing, setEditing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Edit state
   const [editName, setEditName] = useState('');
@@ -133,32 +136,49 @@ export default function HabitDetailScreen() {
   const [editMode, setEditMode] = useState<Mode>('hostel');
   const [editLifeArea, setEditLifeArea] = useState<LifeArea>('mental');
   const [editTarget, setEditTarget] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const habitId = id ? Number(id) : null;
 
   const loadData = useCallback(async () => {
-    if (!habitId) return;
-    const [h, s, ls, pct, hist] = await Promise.all([
-      getHabitById(habitId),
-      getStreak(habitId),
-      getLongestStreak(habitId),
-      getHabitCompletionRate(habitId),
-      getHabitHistory(habitId, 30),
-    ]);
-    if (h) {
-      setHabit(h);
-      setStreak(s);
-      setLongestStreak(ls);
-      setCompletion(pct);
-      setHistory(hist);
+    if (!habitId) {
+      setLoading(false);
+      setLoadError("Invalid habit ID");
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [h, s, ls, pct, hist] = await Promise.all([
+        getHabitById(habitId),
+        getStreak(habitId).catch(() => 0),
+        getLongestStreak(habitId).catch(() => 0),
+        getHabitCompletionRate(habitId).catch(() => 0),
+        getHabitHistory(habitId, 30).catch(() => []),
+      ]);
+      if (h) {
+        setHabit(h);
+        setStreak(s);
+        setLongestStreak(ls);
+        setCompletion(pct);
+        setHistory(hist);
 
-      const parsedIcon = parseHabitIcon(h.icon);
-      setEditName(h.name);
-      setEditIconIdx(iconIndex(parsedIcon));
-      setEditColorIdx(colorIndex(h.color));
-      setEditMode(h.mode);
-      setEditLifeArea(h.lifeArea ?? 'mental');
-      setEditTarget(h.targetPerDay);
+        const parsedIcon = parseHabitIcon(h.icon);
+        setEditName(h.name);
+        setEditIconIdx(iconIndex(parsedIcon));
+        setEditColorIdx(colorIndex(h.color));
+        setEditMode(h.mode);
+        setEditLifeArea(h.lifeArea ?? 'mental');
+        setEditTarget(h.targetPerDay);
+      } else {
+        setLoadError("Habit not found");
+      }
+    } catch (err) {
+      console.error("Failed to load habit details:", err);
+      setLoadError("Could not load habit details");
+    } finally {
+      setLoading(false);
     }
   }, [habitId]);
 
@@ -167,40 +187,72 @@ export default function HabitDetailScreen() {
   }, [loadData]);
 
   const handleSave = async () => {
-    if (!habitId || !editName.trim()) return;
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await updateHabit(habitId, {
-      name: editName.trim(),
-      icon: ICON_OPTIONS[editIconIdx].icon,
-      color: COLOR_OPTIONS[editColorIdx],
-      mode: editMode,
-      lifeArea: editLifeArea,
-      targetPerDay: editTarget,
-    });
-    setEditing(false);
-    loadData();
+    if (!habitId || !editName.trim() || saving) return;
+    try {
+      setSaving(true);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      await updateHabit(habitId, {
+        name: editName.trim(),
+        icon: ICON_OPTIONS[editIconIdx].icon,
+        color: COLOR_OPTIONS[editColorIdx],
+        mode: editMode,
+        lifeArea: editLifeArea,
+        targetPerDay: editTarget,
+      });
+      setEditing(false);
+      loadData();
+    } catch (err) {
+      console.error("Failed to update habit:", err);
+      Alert.alert("Error", "Could not save changes. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleDelete = () => {
-    if (!habitId) return;
+    if (!habitId || deleting) return;
     Alert.alert('Delete Habit', 'This will permanently remove this habit and all its history.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-          await deleteHabit(habitId);
-          router.back();
+          try {
+            setDeleting(true);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            await deleteHabit(habitId);
+            router.back();
+          } catch (err) {
+            console.error("Failed to delete habit:", err);
+            Alert.alert("Error", "Could not delete habit. Please try again.");
+            setDeleting(false);
+          }
         },
       },
     ]);
   };
 
-  if (!habit) {
+  if (loading && !habit) {
     return (
       <View style={[styles.centered, { backgroundColor: t.background }]}>
-        <Body variant="body" color={t.textMuted}>Loading...</Body>
+        <ActivityIndicator size="large" color={t.accent} />
+        <Body variant="body" color={t.textMuted} style={{ marginTop: spacing.md }}>
+          Loading...
+        </Body>
+      </View>
+    );
+  }
+
+  if (!habit) {
+    return (
+      <View style={[styles.centered, { backgroundColor: t.background, padding: spacing.xl }]}>
+        <Heading variant="title2" color={t.textPrimary} style={{ marginBottom: spacing.sm, textAlign: 'center' }}>
+          Habit Not Found
+        </Heading>
+        <Body variant="body" color={t.textMuted} style={{ textAlign: 'center', marginBottom: spacing.xl }}>
+          {loadError || 'This habit could not be loaded.'}
+        </Body>
+        <Button variant="primary" title="Go Back" onPress={() => router.back()} />
       </View>
     );
   }
@@ -524,10 +576,16 @@ export default function HabitDetailScreen() {
             </View>
 
             <View style={styles.editActions}>
-              <Button title="Save Changes" onPress={handleSave} disabled={!editName.trim()} />
+              <Button
+                title="Save Changes"
+                onPress={handleSave}
+                disabled={!editName.trim() || saving}
+                loading={saving}
+              />
               <Button
                 title="Cancel"
                 variant="secondary"
+                disabled={saving}
                 onPress={() => {
                   if (habit) {
                     const parsedIcon = parseHabitIcon(habit.icon);
@@ -553,10 +611,10 @@ export default function HabitDetailScreen() {
               setEditing(true);
             }}
           />
-          <Pressable onPress={handleDelete} style={styles.deleteBtn}>
+          <Pressable onPress={handleDelete} style={[styles.deleteBtn, deleting && { opacity: 0.5 }]} disabled={deleting}>
             <PlatformSymbol ios="trash.fill" material="delete" tintColor={t.danger} size={16} />
             <Body variant="subhead" color={t.danger}>
-              Delete Habit
+              {deleting ? 'Deleting...' : 'Delete Habit'}
             </Body>
           </Pressable>
         </Animated.View>

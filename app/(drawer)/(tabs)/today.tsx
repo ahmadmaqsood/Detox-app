@@ -1,5 +1,6 @@
 import { Card } from "@/components/Card";
 import { HabitIconView } from "@/components/HabitIconView";
+import { HabitsLoadingSkeleton } from "@/components/HabitSkeleton";
 import {
   PlatformSymbol,
   type MaterialIconName,
@@ -11,8 +12,10 @@ import {
   addIntervention,
   completeIntervention,
   endUrgeToolSession,
+  getDailyEntry,
   getEssentialHabitsToday,
   getModeStreak,
+  getMotivationalMessage,
   getTodayHabits,
   recordUrgeToolActionCompletion,
   startUrgeToolSession,
@@ -64,8 +67,10 @@ export default function TodayScreen() {
   const { hardMode } = useHardMode();
   const { focusLock, frequentOpenWarning, dismissWarning } = useFocusLock();
   const [habits, setHabits] = useState<HabitRow[]>([]);
+  const [loadingHabits, setLoadingHabits] = useState(true);
   const [homeStreak, setHomeStreak] = useState(0);
   const [hostelStreak, setHostelStreak] = useState(0);
+  const [dailyMessage, setDailyMessage] = useState<string>("");
   const [urgeToolsOn, setUrgeToolsOn] = useState(false);
   const [urgeSessionId, setUrgeSessionId] = useState<number | null>(null);
   const urgeSessionRef = useRef<number | null>(null);
@@ -92,27 +97,47 @@ export default function TodayScreen() {
     }
   }, []);
 
-  const loadHabits = useCallback(async () => {
+  const loadHabits = useCallback(async (silent = false) => {
     if (!getCurrentFirebaseUser()) {
       setHabits([]);
       setHomeStreak(0);
       setHostelStreak(0);
+      setLoadingHabits(false);
       return;
     }
-    const rows = detox
-      ? await getEssentialHabitsToday(mode)
-      : await getTodayHabits(mode);
-    setHabits(rows);
+    try {
+      if (!silent) {
+        setLoadingHabits(true);
+      }
+      const [rows, dailyEntry] = await Promise.all([
+        detox ? getEssentialHabitsToday(mode) : getTodayHabits(mode),
+        getDailyEntry().catch(() => null),
+      ]);
+      setHabits(rows);
 
-    const [hs, hos] = await Promise.all([
-      getModeStreak("home"),
-      getModeStreak("hostel"),
-    ]);
-    setHomeStreak(hs);
-    setHostelStreak(hos);
+      if (dailyEntry?.motivationalMessage && (!dailyEntry.mode || dailyEntry.mode === mode)) {
+        setDailyMessage(dailyEntry.motivationalMessage);
+      } else {
+        const c = rows.filter((h) => h.completed).length;
+        const p = rows.length - c;
+        const pct = rows.length > 0 ? Math.round((c / rows.length) * 100) : 0;
+        setDailyMessage(getMotivationalMessage(pct, p));
+      }
 
-    if (detox) {
-      await refreshStreak();
+      const [hs, hos] = await Promise.all([
+        getModeStreak("home"),
+        getModeStreak("hostel"),
+      ]);
+      setHomeStreak(hs);
+      setHostelStreak(hos);
+
+      if (detox) {
+        await refreshStreak();
+      }
+    } catch (e) {
+      console.error("Failed to load habits", e);
+    } finally {
+      setLoadingHabits(false);
     }
   }, [mode, detox, refreshStreak]);
 
@@ -132,8 +157,8 @@ export default function TodayScreen() {
       return;
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await toggleHabit(habitId);
-    await loadHabits();
+    await toggleHabit(habitId, undefined, mode);
+    await loadHabits(true);
   };
 
   const handleDetoxToggle = async (value: boolean) => {
@@ -265,7 +290,26 @@ export default function TodayScreen() {
         <Animated.View entering={FadeInDown.delay(100).duration(300)}>
           <Card style={styles.progressCard}>
             <View style={styles.progressHeader}>
-              <Body variant="headline">Essential Habits</Body>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <Body variant="headline">Essential Habits</Body>
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push("/(drawer)/habits");
+                  }}
+                  hitSlop={8}
+                  style={{
+                    paddingHorizontal: spacing.xs,
+                    paddingVertical: 2,
+                    borderRadius: radius.sm,
+                    backgroundColor: t.accent + "18",
+                  }}
+                >
+                  <Caption variant="caption2" color={t.accent} style={{ fontWeight: "600" }}>
+                    Manage
+                  </Caption>
+                </Pressable>
+              </View>
               <Heading variant="title3" color={t.accent}>
                 {Math.round(progress * 100)}%
               </Heading>
@@ -275,11 +319,20 @@ export default function TodayScreen() {
               color={t.accent}
               trackColor={t.border}
             />
+            {dailyMessage ? (
+              <View style={{ marginTop: spacing.sm, paddingTop: 4 }}>
+                <Caption variant="caption2" color={t.textSecondary} style={{ fontStyle: "italic", textAlign: "center" }}>
+                  💡 {dailyMessage}
+                </Caption>
+              </View>
+            ) : null}
           </Card>
         </Animated.View>
 
         {/* Essential Habits Only */}
-        {habits.length === 0 ? (
+        {loadingHabits ? (
+          <HabitsLoadingSkeleton count={3} minimal />
+        ) : habits.length === 0 ? (
           <Card animated style={styles.emptyCard}>
             <View style={[styles.emptyIcon, { backgroundColor: t.accentMuted }]}>
               <PlatformSymbol
@@ -405,7 +458,7 @@ export default function TodayScreen() {
         key={urgeSessionId ?? "off"}
         visible={urgeToolsOn}
         sessionId={urgeSessionId}
-        onLogged={loadHabits}
+        onLogged={() => loadHabits(true)}
         onAllComplete={() => handleUrgeToolsChange(false)}
         t={t}
       />
@@ -490,10 +543,36 @@ export default function TodayScreen() {
           <StatPill label="Done" value={completed} color={t.accent} />
           <StatPill label="Left" value={pending} color={t.warning} />
         </View>
+        {dailyMessage ? (
+          <View
+            style={{
+              marginTop: spacing.md,
+              paddingTop: spacing.sm,
+              borderTopWidth: 1,
+              borderTopColor: t.borderLight,
+            }}
+          >
+            <Caption variant="caption1" color={t.textSecondary} style={{ fontStyle: "italic", textAlign: "center" }}>
+              💡 {dailyMessage}
+            </Caption>
+          </View>
+        ) : null}
       </Card>
 
       {/* ─── Habits ──────────────────────────────────── */}
-      {habits.length === 0 ? (
+      {loadingHabits ? (
+        <View style={styles.habitList}>
+          <View style={styles.sectionHeader}>
+            <Body variant="headline" color={t.textSecondary}>
+              {homeOrderActive ? "Today's order" : "Habits"}
+            </Body>
+            <Caption variant="caption2" color={t.textMuted}>
+              Loading habits...
+            </Caption>
+          </View>
+          <HabitsLoadingSkeleton count={4} />
+        </View>
+      ) : habits.length === 0 ? (
         <Card animated style={styles.emptyCard}>
           <View style={[styles.emptyIcon, { backgroundColor: t.accentMuted }]}>
             <PlatformSymbol
@@ -618,57 +697,7 @@ function ScreenTimeInput({
   );
 }
 
-/* function DangerZoneStrip({
-  danger,
-  t,
-  router,
-}: {
-  danger: DangerZoneResult | null;
-  t: ReturnType<typeof useAppTheme>;
-  router: ReturnType<typeof useRouter>;
-}) {
-  if (!danger || danger.level === "ok") return null;
-  const critical = danger.level === "critical";
-  return (
-    <Animated.View entering={FadeInDown.duration(320)}>
-      <Pressable
-        onPress={() => {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          router.push("/(drawer)/lifeDashboard" as never);
-        }}
-        style={[
-          styles.dangerStrip,
-          {
-            backgroundColor: critical ? t.dangerMuted : t.warningMuted,
-            borderColor: critical ? t.danger : t.warning,
-          },
-        ]}
-      >
-        <PlatformSymbol
-          ios="exclamationmark.triangle.fill"
-          material="alert"
-          tintColor={critical ? t.danger : t.warning}
-          size={22}
-        />
-        <View style={{ flex: 1, gap: spacing.xs }}>
-          <Body
-            variant="headline"
-            color={critical ? t.danger : t.warning}
-            numberOfLines={critical ? 2 : 3}
-          >
-            {danger.title}
-          </Body>
-          <Caption variant="footnote" color={t.textSecondary}>
-            {danger.body}
-          </Caption>
-          <Caption variant="caption2" color={t.accent} style={{ fontWeight: "700" }}>
-            Life Hub → interventions
-          </Caption>
-        </View>
-      </Pressable>
-    </Animated.View>
-  );
-} */
+
 
 function FocusLockBanner({
   t,

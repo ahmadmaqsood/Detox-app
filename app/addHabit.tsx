@@ -1,5 +1,10 @@
+import { HabitIconView } from '@/components/HabitIconView';
+import { PlatformSymbol } from '@/components/PlatformSymbol';
+import * as Haptics from 'expo-haptics';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -8,20 +13,16 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
-import { HabitIconView } from '@/components/HabitIconView';
-import { PlatformSymbol } from '@/components/PlatformSymbol';
-import * as Haptics from 'expo-haptics';
-import Animated, { FadeIn, FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeIn } from 'react-native-reanimated';
 
-import { useAppTheme } from '@/theme';
-import { spacing, radius } from '@/theme/spacing';
-import { typography } from '@/theme/typography';
 import { Button } from '@/components/Button';
 import { Body, Caption, Heading } from '@/components/Typography';
 import { addHabit } from "@/lib/firestoreDatabase";
-import { useMode } from '@/store/ModeContext';
 import type { HabitIcon, LifeArea, Mode } from '@/lib/types';
+import { useMode } from '@/store/ModeContext';
+import { useAppTheme } from '@/theme';
+import { radius, spacing } from '@/theme/spacing';
+import { typography } from '@/theme/typography';
 
 // ─── Icon catalog ──────────────────────────────────────────────
 
@@ -72,31 +73,45 @@ const LIFE_AREA_OPTIONS: { label: string; value: LifeArea }[] = [
 
 export default function AddHabitScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ mode?: string }>();
   const t = useAppTheme();
   const { mode: currentMode } = useMode();
 
   const [name, setName] = useState('');
   const [selectedIcon, setSelectedIcon] = useState(0);
   const [selectedColor, setSelectedColor] = useState(0);
-  const [habitMode, setHabitMode] = useState<Mode>(currentMode);
+  const initialMode: Mode =
+    params.mode === 'home' || params.mode === 'hostel'
+      ? params.mode
+      : currentMode;
+  const [habitMode, setHabitMode] = useState<Mode>(initialMode);
   const [lifeArea, setLifeArea] = useState<LifeArea>('mental');
   const [target, setTarget] = useState(1);
+  const [saving, setSaving] = useState(false);
 
   const icon = ICON_OPTIONS[selectedIcon].icon;
   const color = COLOR_OPTIONS[selectedColor];
 
   const handleSave = async () => {
-    if (!name.trim()) return;
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await addHabit({
-      name: name.trim(),
-      icon,
-      color,
-      mode: habitMode,
-      lifeArea,
-      targetPerDay: target,
-    });
-    router.back();
+    if (!name.trim() || saving) return;
+    try {
+      setSaving(true);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      await addHabit({
+        name: name.trim(),
+        icon,
+        color,
+        mode: habitMode,
+        lifeArea,
+        targetPerDay: target,
+      });
+      router.back();
+    } catch (err) {
+      console.error("Failed to add habit:", err);
+      Alert.alert("Error", "Could not create habit. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -315,8 +330,18 @@ export default function AddHabitScreen() {
 
       {/* ─── Actions (pinned) ───────────────────── */}
       <View style={[styles.actions, { backgroundColor: t.background }]}>
-        <Button title="Save Habit" onPress={handleSave} disabled={!name.trim()} />
-        <Button title="Cancel" variant="secondary" onPress={() => router.back()} />
+        <Button
+          title="Save Habit"
+          onPress={handleSave}
+          disabled={!name.trim() || saving}
+          loading={saving}
+        />
+        <Button
+          title="Cancel"
+          variant="secondary"
+          onPress={() => router.back()}
+          disabled={saving}
+        />
       </View>
     </KeyboardAvoidingView>
   );

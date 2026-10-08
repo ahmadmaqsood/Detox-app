@@ -49,6 +49,25 @@ export interface Entry {
   completed: number; // 0 | 1 (SQLite has no boolean)
 }
 
+export interface DailyHabitEntry {
+  id: number;
+  name: string;
+  completed: boolean;
+  time: string | null;
+}
+
+export interface DailyProgressEntry {
+  date: string;
+  mode: Mode;
+  totalHabits: number;
+  checkedHabits: number;
+  leftHabits: number;
+  completionPercentage: number;
+  motivationalMessage: string;
+  habits: DailyHabitEntry[];
+  updatedAt?: any;
+}
+
 export interface Metrics {
   date: string;
   screenTime: number;
