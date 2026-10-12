@@ -173,8 +173,8 @@ export default function ChallengesScreen() {
   });
   const [catFilter, setCatFilter] = useState<CatFilter>("all");
   const [statusFilter, setStatusFilter] = useState<
-    "new" | "in_progress" | "completed"
-  >("in_progress");
+    "all" | "active" | "completed" | "locked"
+  >("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterSheetOpen, setFilterSheetOpen] = useState(false);
   const [showChallengeComplete, setShowChallengeComplete] = useState(false);
@@ -207,53 +207,18 @@ export default function ChallengesScreen() {
     return rows;
   }, [challenges, catFilter, searchQuery]);
 
-  const filtersAreDefault = catFilter === "all" && statusFilter === "in_progress";
+  const filtersAreDefault = catFilter === "all" && statusFilter === "all";
 
-  const activeChallenges = visible.filter(
-    (c) => c.startedAt && !c.completedAt,
-  );
-  const availableChallenges = visible.filter(
-    (c) => !c.startedAt && !c.completedAt,
-  );
-  const completedChallenges = visible.filter((c) => Boolean(c.completedAt));
+  const activeChallenges = visible.filter((c) => c.status === "active");
+  const completedChallenges = visible.filter((c) => c.status === "completed");
+  const lockedChallenges = visible.filter((c) => c.status === "locked");
 
   const listForStatus = useMemo(() => {
-    if (statusFilter === "new") return availableChallenges;
+    if (statusFilter === "active") return activeChallenges;
     if (statusFilter === "completed") return completedChallenges;
-    return activeChallenges;
-  }, [statusFilter, availableChallenges, completedChallenges, activeChallenges]);
-
-  const handleStart = async (id: number) => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await startChallenge(id);
-    load();
-  };
-
-  const handleLogDay = async (id: number) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const finished = await incrementChallengeProgress(id);
-    await load();
-    if (finished) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setShowChallengeComplete(true);
-      setTimeout(() => setShowChallengeComplete(false), 4000);
-    }
-  };
-
-  const handleReset = (id: number, name: string) => {
-    Alert.alert("Reset Challenge", `Reset "${name}" back to day 0?`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Reset",
-        style: "destructive",
-        onPress: async () => {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-          await resetChallenge(id);
-          load();
-        },
-      },
-    ]);
-  };
+    if (statusFilter === "locked") return lockedChallenges;
+    return visible;
+  }, [statusFilter, visible, activeChallenges, completedChallenges, lockedChallenges]);
 
   return (
     <View style={{ flex: 1, backgroundColor: t.background }}>
@@ -389,16 +354,18 @@ export default function ChallengesScreen() {
           <View style={styles.section}>
             <SectionLabel
               label={
-                statusFilter === "new"
-                  ? "AVAILABLE"
-                  : statusFilter === "completed"
-                    ? "COMPLETED"
-                    : "ACTIVE"
+                statusFilter === "all"
+                  ? `ALL CHALLENGES (${listForStatus.length})`
+                  : statusFilter === "active"
+                    ? "ACTIVE CHALLENGE"
+                    : statusFilter === "completed"
+                      ? `COMPLETED (${listForStatus.length})`
+                      : `LOCKED (${listForStatus.length})`
               }
               color={
                 statusFilter === "completed"
-                  ? "#F59E0B"
-                  : statusFilter === "new"
+                  ? "#10B981"
+                  : statusFilter === "locked"
                     ? t.textSecondary
                     : t.accent
               }
@@ -407,18 +374,11 @@ export default function ChallengesScreen() {
             {listForStatus.map((c, i) => (
               <Animated.View
                 key={c.id}
-                entering={FadeInDown.delay(i * 80).duration(300)}
+                entering={FadeInDown.delay(Math.min(i * 30, 300)).duration(240)}
               >
                 <ChallengeCard
                   challenge={c}
                   t={t}
-                  onLogDay={
-                    statusFilter === "in_progress" ? () => handleLogDay(c.id) : undefined
-                  }
-                  onReset={
-                    statusFilter === "in_progress" ? () => handleReset(c.id, c.name) : undefined
-                  }
-                  onStart={statusFilter === "new" ? () => handleStart(c.id) : undefined}
                   onOpen={() =>
                     router.push({
                       pathname: "/challengeDetail",
@@ -509,14 +469,16 @@ export default function ChallengesScreen() {
                 Status
               </Caption>
               <View style={styles.sheetChipWrap}>
-                {(["new", "in_progress", "completed"] as const).map((k) => {
+                {(["all", "active", "completed", "locked"] as const).map((k) => {
                   const on = statusFilter === k;
                   const label =
-                    k === "new"
-                      ? "New"
-                      : k === "in_progress"
-                        ? "In progress"
-                        : "Completed";
+                    k === "all"
+                      ? "All (49)"
+                      : k === "active"
+                        ? "Active"
+                        : k === "completed"
+                          ? "Completed"
+                          : "Locked";
                   return (
                     <Pressable
                       key={k}
@@ -594,202 +556,261 @@ export default function ChallengesScreen() {
 function ChallengeCard({
   challenge: c,
   t,
-  onStart,
-  onLogDay,
-  onReset,
   onOpen,
 }: {
   challenge: Challenge;
   t: ReturnType<typeof useAppTheme>;
-  onStart?: () => void;
-  onLogDay?: () => void;
-  onReset?: () => void;
   onOpen?: () => void;
 }) {
   const meta = challengeMeta(c.duration);
   const cat = (c.category ?? "discipline") as ChallengeCategory;
   const cv = categoryVisual(cat);
-  const pct = c.duration > 0 ? (c.progress / c.duration) * 100 : 0;
-  const isActive = !!c.startedAt && !c.completedAt;
-  const isCompleted = !!c.completedAt;
-  const remaining = c.duration - c.progress;
+  const isCompleted = c.status === "completed" || !!c.completedAt;
+  const isActive = c.status === "active" || (!isCompleted && !!c.startedAt);
+  const isLocked = c.status === "locked" || (!isCompleted && !isActive);
+  const pct = isCompleted ? 100 : c.duration > 0 ? (c.progress / c.duration) * 100 : 0;
 
   return (
     <Pressable onPress={onOpen} disabled={!onOpen}>
-      <View style={[styles.card, { backgroundColor: t.card }]}>
-      {/* Header row */}
-      <View style={styles.cardHeader}>
-        <View
-          style={[styles.cardIconWrap, { backgroundColor: cv.color + "18" }]}
-        >
-          <PlatformSymbol
-            ios={cv.ios}
-            material={cv.material}
-            tintColor={cv.color}
-            size={20}
-          />
-        </View>
-        <View style={styles.cardHeaderText}>
-          <Heading variant="title3">{c.name}</Heading>
-          <Caption variant="caption2" color={t.textMuted}>
-            {CATEGORY_LABELS[cat]} · {meta.tier} · {c.duration} days
-            {c.difficulty && c.xp != null
-              ? ` · ${c.difficulty} · ${c.xp} XP`
-              : ""}
-          </Caption>
-        </View>
-        {isCompleted && <CompletionBadge color={cv.color} />}
-        {isActive && (
-          <View
-            style={[styles.activePill, { backgroundColor: t.accent + "18" }]}
-          >
-            <Caption
-              variant="caption2"
-              color={t.accent}
-              style={{ fontWeight: "700" }}
-            >
-              Day {c.progress}
-            </Caption>
-          </View>
-        )}
-      </View>
-
-      {/* Description */}
-      <Body variant="callout" color={t.textSecondary} style={styles.cardDesc}>
-        {c.description}
-      </Body>
-      {c.rules ? (
-        <View
-          style={[
-            styles.rulesBox,
-            { backgroundColor: t.background, borderColor: t.border },
-          ]}
-        >
-          <Caption variant="caption2" color={t.textMuted} style={styles.rulesLabel}>
-            RULES
-          </Caption>
-          <Body variant="footnote" color={t.textSecondary}>
-            {c.rules}
-          </Body>
-        </View>
-      ) : null}
-
-      {/* Progress bar */}
-      <AnimatedProgressBar pct={pct} color={cv.color} track={t.background} />
-
-      {/* Footer stats */}
-      <View style={styles.cardFooter}>
-        <Caption variant="caption2" color={t.textMuted}>
-          {c.progress}/{c.duration} days
-        </Caption>
-        <Caption
-          variant="caption2"
-          color={cv.color}
-          style={{ fontWeight: "700" }}
-        >
-          {Math.round(pct)}%
-        </Caption>
-      </View>
-
-      {/* Day milestones */}
-      {(isActive || isCompleted) && (
-        <View style={styles.milestoneRow}>
-          {buildMilestones(c.duration).map((m) => {
-            const reached = c.progress >= m;
-            return (
-              <View key={m} style={styles.milestone}>
-                <View
-                  style={[
-                    styles.milestoneDot,
-                    {
-                      backgroundColor: reached ? cv.color : t.border,
-                      borderColor: reached ? cv.color : t.border,
-                    },
-                  ]}
-                >
-                  {reached && (
-                    <PlatformSymbol
-                      ios="checkmark"
-                      material="check"
-                      tintColor="#fff"
-                      size={8}
-                    />
-                  )}
-                </View>
-                <Caption
-                  variant="caption2"
-                  color={reached ? cv.color : t.textMuted}
-                >
-                  {m}d
-                </Caption>
-              </View>
-            );
-          })}
-        </View>
-      )}
-
-      {/* Actions */}
-      <View style={styles.cardActions}>
-        {!isActive && !isCompleted && onStart && (
-          <Button title="Start Challenge" onPress={onStart} />
-        )}
-        {isActive && onLogDay && (
-          <Pressable
-            onPress={onLogDay}
-            style={[styles.logDayBtn, { backgroundColor: cv.color }]}
-          >
-            <PlatformSymbol
-              ios="plus.circle.fill"
-              material="plus-circle"
-              tintColor="#fff"
-              size={18}
-            />
-            <Body variant="headline" color="#fff">
-              Log Day {c.progress + 1}
-            </Body>
-          </Pressable>
-        )}
-        {isActive && remaining > 0 && (
-          <Caption
-            variant="footnote"
-            color={t.textMuted}
-            style={{ textAlign: "center", marginTop: spacing.xs }}
-          >
-            {remaining} {remaining === 1 ? "day" : "days"} remaining
-          </Caption>
-        )}
-        {isCompleted && (
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: t.card,
+            borderColor: isActive ? t.accent : isCompleted ? "#10B98150" : t.border,
+            borderWidth: isActive ? 1.5 : 1,
+            opacity: isLocked ? 0.75 : 1,
+          },
+        ]}
+      >
+        {/* Header row */}
+        <View style={styles.cardHeader}>
           <View
             style={[
-              styles.completedBanner,
-              { backgroundColor: cv.color + "12" },
+              styles.cardIconWrap,
+              {
+                backgroundColor: isLocked
+                  ? t.border + "40"
+                  : isCompleted
+                    ? "#10B98118"
+                    : cv.color + "18",
+              },
             ]}
           >
             <PlatformSymbol
-              ios="checkmark.seal.fill"
-              material="check-decagram"
-              tintColor={cv.color}
-              size={18}
+              ios={isLocked ? "lock.fill" : cv.ios}
+              material={isLocked ? "lock" : cv.material}
+              tintColor={isLocked ? t.textMuted : isCompleted ? "#10B981" : cv.color}
+              size={20}
             />
-            <Body variant="bodyMedium" color={cv.color}>
-              Challenge Complete!
+          </View>
+          <View style={styles.cardHeaderText}>
+            <Heading variant="title3" color={isLocked ? t.textSecondary : t.textPrimary}>
+              {c.name}
+            </Heading>
+            <Caption variant="caption2" color={t.textMuted}>
+              #{c.id} · {CATEGORY_LABELS[cat]} · {meta.tier} · {c.duration} {c.duration === 1 ? "day" : "days"}
+              {c.difficulty && c.xp != null
+                ? ` · ${c.difficulty} · ${c.xp} XP`
+                : ""}
+            </Caption>
+          </View>
+          {isCompleted && <CompletionBadge color="#10B981" />}
+          {isActive && (
+            <View
+              style={[styles.activePill, { backgroundColor: t.accent + "18" }]}
+            >
+              <Caption
+                variant="caption2"
+                color={t.accent}
+                style={{ fontWeight: "700" }}
+              >
+                Day {c.progress}/{c.duration}
+              </Caption>
+            </View>
+          )}
+          {isLocked && (
+            <View
+              style={[styles.activePill, { backgroundColor: t.border + "40" }]}
+            >
+              <Caption
+                variant="caption2"
+                color={t.textMuted}
+                style={{ fontWeight: "600" }}
+              >
+                Locked
+              </Caption>
+            </View>
+          )}
+        </View>
+
+        {/* Description */}
+        <Body
+          variant="callout"
+          color={isLocked ? t.textMuted : t.textSecondary}
+          style={styles.cardDesc}
+        >
+          {c.description}
+        </Body>
+
+        {c.rules ? (
+          <View
+            style={[
+              styles.rulesBox,
+              { backgroundColor: t.background, borderColor: t.border },
+            ]}
+          >
+            <Caption variant="caption2" color={t.textMuted} style={styles.rulesLabel}>
+              RULES
+            </Caption>
+            <Body variant="footnote" color={t.textSecondary}>
+              {c.rules}
             </Body>
           </View>
+        ) : null}
+
+        {/* Progress bar */}
+        <AnimatedProgressBar
+          pct={pct}
+          color={isCompleted ? "#10B981" : cv.color}
+          track={t.background}
+        />
+
+        {/* Footer stats */}
+        <View style={styles.cardFooter}>
+          <Caption variant="caption2" color={t.textMuted}>
+            {isCompleted ? c.duration : c.progress}/{c.duration} days
+          </Caption>
+          <Caption
+            variant="caption2"
+            color={isCompleted ? "#10B981" : cv.color}
+            style={{ fontWeight: "700" }}
+          >
+            {Math.round(pct)}%
+          </Caption>
+        </View>
+
+        {/* Day milestones */}
+        {(isActive || isCompleted) && (
+          <View style={styles.milestoneRow}>
+            {buildMilestones(c.duration).map((m) => {
+              const reached = isCompleted || c.progress >= m;
+              const dotColor = isCompleted ? "#10B981" : cv.color;
+              return (
+                <View key={m} style={styles.milestone}>
+                  <View
+                    style={[
+                      styles.milestoneDot,
+                      {
+                        backgroundColor: reached ? dotColor : t.border,
+                        borderColor: reached ? dotColor : t.border,
+                      },
+                    ]}
+                  >
+                    {reached && (
+                      <PlatformSymbol
+                        ios="checkmark"
+                        material="check"
+                        tintColor="#fff"
+                        size={8}
+                      />
+                    )}
+                  </View>
+                  <Caption
+                    variant="caption2"
+                    color={reached ? dotColor : t.textMuted}
+                  >
+                    {m}d
+                  </Caption>
+                </View>
+              );
+            })}
+          </View>
         )}
-        {(isActive || isCompleted) && onReset && (
-          <Pressable onPress={onReset} style={styles.resetBtn}>
-            <PlatformSymbol
-              ios="arrow.counterclockwise"
-              material="refresh"
-              tintColor={t.textMuted}
-              size={14}
-            />
-            <Caption variant="footnote" color={t.textMuted}>
-              Reset
-            </Caption>
-          </Pressable>
-        )}
-      </View>
+
+        {/* Informative status banners (NO manual buttons - automated progression) */}
+        <View style={styles.cardActions}>
+          {isActive && (
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: spacing.sm,
+                backgroundColor: t.accent + "12",
+                borderColor: t.accent + "30",
+                borderWidth: 1,
+                paddingVertical: spacing.sm,
+                paddingHorizontal: spacing.md,
+                borderRadius: radius.md,
+                width: "100%",
+              }}
+            >
+              <PlatformSymbol
+                ios="bolt.fill"
+                material="flash-on"
+                tintColor={t.accent}
+                size={16}
+              />
+              <Caption
+                variant="caption1"
+                color={t.accent}
+                style={{ flex: 1, fontWeight: "600" }}
+              >
+                Auto-tracks with daily habit checklist (≥50%). Miss a day and progress restarts from day 0.
+              </Caption>
+            </View>
+          )}
+
+          {isLocked && (
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: spacing.sm,
+                backgroundColor: t.background,
+                borderColor: t.border,
+                borderWidth: 1,
+                paddingVertical: spacing.sm,
+                paddingHorizontal: spacing.md,
+                borderRadius: radius.md,
+                width: "100%",
+              }}
+            >
+              <PlatformSymbol
+                ios="lock.fill"
+                material="lock"
+                tintColor={t.textMuted}
+                size={14}
+              />
+              <Caption
+                variant="caption2"
+                color={t.textMuted}
+                style={{ flex: 1 }}
+              >
+                Unlocks automatically when Challenge #{c.id - 1} is completed.
+              </Caption>
+            </View>
+          )}
+
+          {isCompleted && (
+            <View
+              style={[
+                styles.completedBanner,
+                { backgroundColor: "#10B98115", width: "100%" },
+              ]}
+            >
+              <PlatformSymbol
+                ios="checkmark.seal.fill"
+                material="check-decagram"
+                tintColor="#10B981"
+                size={18}
+              />
+              <Body variant="bodyMedium" color="#10B981">
+                Challenge Complete! (+{c.xp ?? 25} XP)
+              </Body>
+            </View>
+          )}
+        </View>
       </View>
     </Pressable>
   );
@@ -971,7 +992,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
-    paddingHorizontal: spacing.xl,
   },
   searchField: {
     flex: 1,
@@ -1056,7 +1076,6 @@ const styles = StyleSheet.create({
   },
   emptyCard: {
     marginTop: spacing.md,
-    marginHorizontal: spacing.xl,
     padding: spacing.xl,
     borderRadius: radius.xl,
   },

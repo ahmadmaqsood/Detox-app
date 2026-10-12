@@ -9,19 +9,18 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { Body, Caption, Heading } from "@/components/Typography";
 import { getCurrentFirebaseUser } from "@/lib/firebase";
 import {
-  addIntervention,
-  completeIntervention,
-  endUrgeToolSession,
+  getChallenges,
   getDailyEntry,
+  getDailyIntervention,
   getEssentialHabitsToday,
   getModeStreak,
   getMotivationalMessage,
   getTodayHabits,
-  recordUrgeToolActionCompletion,
-  startUrgeToolSession,
-  toggleHabit,
+  recordDailyInterventionAction,
+  syncAutoChallengeProgress,
+  toggleHabit
 } from "@/lib/firestoreDatabase";
-import { parseHabitIcon, type Habit, type Mode } from "@/lib/types";
+import { parseHabitIcon, type Challenge, type Habit, type Mode } from "@/lib/types";
 import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import { useAppearance } from "@/store/AppearanceContext";
 import { useDetox } from "@/store/DetoxContext";
@@ -40,19 +39,17 @@ import Animated, {
   Easing,
   FadeIn,
   FadeInDown,
-  FadeInUp,
-  interpolateColor,
   Layout,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
-  withTiming,
+  withTiming
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 const modeSegments: { label: string; value: Mode }[] = [
-  { label: "🏠  Home", value: "home" },
-  { label: "🏢  Hostel", value: "hostel" },
+  { label: "Home", value: "home" },
+  { label: "Hostel", value: "hostel" },
 ];
 
 type HabitRow = Habit & { completed: number };
@@ -72,57 +69,43 @@ export default function TodayScreen() {
   const [hostelStreak, setHostelStreak] = useState(0);
   const [dailyMessage, setDailyMessage] = useState<string>("");
   const [urgeToolsOn, setUrgeToolsOn] = useState(false);
-  const [urgeSessionId, setUrgeSessionId] = useState<number | null>(null);
-  const urgeSessionRef = useRef<number | null>(null);
+  const [activeChallenge, setActiveChallenge] = useState<Challenge | null>(null);
   const scrollRef = useScrollToTopOnTabFocus();
 
-  const handleUrgeToolsChange = useCallback(async (next: boolean) => {
-    if (next) {
-      try {
-        const id = await startUrgeToolSession();
-        urgeSessionRef.current = id;
-        setUrgeSessionId(id);
-        setUrgeToolsOn(true);
-      } catch {
-        Alert.alert("Couldn’t start", "Recovery session didn’t save. Try again.");
-      }
-      return;
-    }
-    const sid = urgeSessionRef.current;
-    urgeSessionRef.current = null;
-    setUrgeSessionId(null);
-    setUrgeToolsOn(false);
-    if (sid != null) {
-      await endUrgeToolSession(sid);
-    }
+  const handleUrgeToolsChange = useCallback((next: boolean) => {
+    setUrgeToolsOn(next);
   }, []);
+
+  const habitsRef = useRef<HabitRow[]>([]);
+  habitsRef.current = habits;
 
   const loadHabits = useCallback(async (silent = false) => {
     if (!getCurrentFirebaseUser()) {
       setHabits([]);
       setHomeStreak(0);
       setHostelStreak(0);
+      setActiveChallenge(null);
       setLoadingHabits(false);
       return;
     }
     try {
-      if (!silent) {
+      if (!silent && habitsRef.current.length === 0) {
         setLoadingHabits(true);
       }
-      const [rows, dailyEntry] = await Promise.all([
-        detox ? getEssentialHabitsToday(mode) : getTodayHabits(mode),
+      const [rows, dailyEntry, challengesList] = await Promise.all([
+        getTodayHabits(mode, detox),
         getDailyEntry().catch(() => null),
+        getChallenges().catch(() => []),
       ]);
       setHabits(rows);
 
-      if (dailyEntry?.motivationalMessage && (!dailyEntry.mode || dailyEntry.mode === mode)) {
-        setDailyMessage(dailyEntry.motivationalMessage);
-      } else {
-        const c = rows.filter((h) => h.completed).length;
-        const p = rows.length - c;
-        const pct = rows.length > 0 ? Math.round((c / rows.length) * 100) : 0;
-        setDailyMessage(getMotivationalMessage(pct, p));
-      }
+      const curChall = challengesList.find((c) => c.status === "active") ?? null;
+      setActiveChallenge(curChall);
+
+      const c = rows.filter((h) => h.completed).length;
+      const p = rows.length - c;
+      const pct = rows.length > 0 ? Math.round((c / rows.length) * 100) : 0;
+      setDailyMessage(getMotivationalMessage(pct, p));
 
       const [hs, hos] = await Promise.all([
         getModeStreak("home"),
@@ -143,7 +126,8 @@ export default function TodayScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadHabits();
+      const hasExistingHabits = habitsRef.current.length > 0;
+      loadHabits(hasExistingHabits);
     }, [loadHabits]),
   );
 
@@ -157,8 +141,30 @@ export default function TodayScreen() {
       return;
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await toggleHabit(habitId, undefined, mode);
-    await loadHabits(true);
+
+    // 1. Instant optimistic update in local state (0ms)
+    setHabits((prev) =>
+      prev.map((h) =>
+        h.id === habitId ? { ...h, completed: h.completed ? 0 : 1 } : h
+      )
+    );
+
+    // 2. Persist to Firestore & sync cache + challenge progression
+    try {
+      await toggleHabit(habitId, undefined, mode);
+      const challProg = await syncAutoChallengeProgress();
+      if (challProg?.completedChallenge) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        Alert.alert(
+          "🏆 Challenge Completed!",
+          `Congratulations! You completed Challenge #${challProg.completedChallenge.id}: "${challProg.completedChallenge.name}" (+${challProg.completedChallenge.xp} XP)!\n\nNext challenge is now unlocked.`,
+        );
+      }
+      await loadHabits(true);
+    } catch (e) {
+      console.error("Failed to toggle habit:", e);
+      await loadHabits(true);
+    }
   };
 
   const handleDetoxToggle = async (value: boolean) => {
@@ -174,206 +180,9 @@ export default function TodayScreen() {
   const pending = habits.length - completed;
   const progress = habits.length > 0 ? completed / habits.length : 0;
 
-  /** Home Control Center: show routine as an ordered list; checking a tile hides it until tomorrow. */
-  const homeOrderActive = mode === "home" && !detox;
-  const visibleHabits = useMemo(
-    () => (homeOrderActive ? habits.filter((h) => !h.completed) : habits),
-    [homeOrderActive, habits],
-  );
+  const homeOrderActive = false;
+  const visibleHabits = habits;
 
-  // ─── Detox Mode UI ──────────────────────────────────
-  if (detox) {
-    return (
-      <ScrollView
-        ref={scrollRef}
-        style={{ flex: 1, backgroundColor: t.background }}
-        contentContainerStyle={[
-          styles.scroll,
-          {
-            paddingTop: insets.top + spacing.md,
-            paddingBottom: spacing["5xl"] + 28 + insets.bottom,
-          },
-        ]}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.headerTopRow}>
-            <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                navigation.getParent<DrawerNavigationProp<any>>()?.openDrawer();
-              }}
-              hitSlop={12}
-            >
-              <PlatformSymbol
-                ios="line.3.horizontal"
-                material="menu"
-                tintColor={t.textPrimary}
-                size={22}
-              />
-            </Pressable>
-            <View style={styles.headerTitleBlock}>
-              <Caption variant="footnote" color={t.textMuted}>
-                {new Date().toLocaleDateString("en-US", {
-                  weekday: "long",
-                  month: "short",
-                  day: "numeric",
-                })}
-              </Caption>
-              <Heading variant="title1" color={t.accent} style={styles.headerTitle} numberOfLines={2}>
-                Detox Mode
-              </Heading>
-            </View>
-          </View>
-          <View style={styles.headerActionRow}>
-            <DetoxToggle value={detox} onToggle={handleDetoxToggle} t={t} />
-            <AppearanceToggleButton t={t} />
-          </View>
-        </View>
-
-        {focusLock && frequentOpenWarning && (
-          <FocusLockBanner
-            t={t}
-            onDismiss={dismissWarning}
-            onOpenFocus={() => router.push("/(drawer)/focusMode")}
-          />
-        )}
-
-        {/* <DangerZoneStrip danger={dangerZone} t={t} router={router} /> */}
-
-        <ModeDualStreakStrip
-          home={homeStreak}
-          hostel={hostelStreak}
-          active={mode}
-          t={t}
-        />
-
-        <UrgeToolsBar
-          value={urgeToolsOn}
-          onValueChange={handleUrgeToolsChange}
-          t={t}
-        />
-        <UrgeRecoveryPanel
-          key={urgeSessionId ?? "off"}
-          visible={urgeToolsOn}
-          sessionId={urgeSessionId}
-          onLogged={loadHabits}
-          onAllComplete={() => handleUrgeToolsChange(false)}
-          t={t}
-        />
-
-        {/* Detox Streak */}
-        <Animated.View entering={FadeIn.duration(400)}>
-          <View style={[styles.detoxHero, { backgroundColor: t.accent + '10' }]}>
-            <View style={[styles.detoxGlow, { backgroundColor: t.accent + '20' }]}>
-              <PlatformSymbol
-                ios="shield.checkmark.fill"
-                material="shield-check"
-                tintColor={t.accent}
-                size={32}
-              />
-            </View>
-            <Heading variant="largeTitle" color={t.accent} style={styles.detoxNumber}>
-              {detoxStreak}
-            </Heading>
-            <Body variant="bodyMedium" color={t.textSecondary}>
-              {detoxStreak === 1 ? "day clean" : "days clean"}
-            </Body>
-            <Caption variant="footnote" color={t.textMuted} style={{ marginTop: spacing.xs }}>
-              Focus on what matters. Stay disciplined.
-            </Caption>
-          </View>
-        </Animated.View>
-
-        {/* Progress */}
-        <Animated.View entering={FadeInDown.delay(100).duration(300)}>
-          <Card style={styles.progressCard}>
-            <View style={styles.progressHeader}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-                <Body variant="headline">Essential Habits</Body>
-                <Pressable
-                  onPress={() => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    router.push("/(drawer)/habits");
-                  }}
-                  hitSlop={8}
-                  style={{
-                    paddingHorizontal: spacing.xs,
-                    paddingVertical: 2,
-                    borderRadius: radius.sm,
-                    backgroundColor: t.accent + "18",
-                  }}
-                >
-                  <Caption variant="caption2" color={t.accent} style={{ fontWeight: "600" }}>
-                    Manage
-                  </Caption>
-                </Pressable>
-              </View>
-              <Heading variant="title3" color={t.accent}>
-                {Math.round(progress * 100)}%
-              </Heading>
-            </View>
-            <ProgressBar
-              progress={progress}
-              color={t.accent}
-              trackColor={t.border}
-            />
-            {dailyMessage ? (
-              <View style={{ marginTop: spacing.sm, paddingTop: 4 }}>
-                <Caption variant="caption2" color={t.textSecondary} style={{ fontStyle: "italic", textAlign: "center" }}>
-                  💡 {dailyMessage}
-                </Caption>
-              </View>
-            ) : null}
-          </Card>
-        </Animated.View>
-
-        {/* Essential Habits Only */}
-        {loadingHabits ? (
-          <HabitsLoadingSkeleton count={3} minimal />
-        ) : habits.length === 0 ? (
-          <Card animated style={styles.emptyCard}>
-            <View style={[styles.emptyIcon, { backgroundColor: t.accentMuted }]}>
-              <PlatformSymbol
-                ios="checkmark.shield.fill"
-                material="shield-check"
-                tintColor={t.accent}
-                size={28}
-              />
-            </View>
-            <Body
-              variant="callout"
-              color={t.textSecondary}
-              style={styles.emptyText}
-            >
-              No essential habits found for {mode} mode.
-            </Body>
-          </Card>
-        ) : (
-          <View style={styles.habitList}>
-            {habits.map((habit, index) => (
-              <HabitCard
-                key={habit.id}
-                habit={habit}
-                index={index}
-                onToggle={handleToggle}
-                onPress={() =>
-                  router.push({
-                    pathname: "/habitDetail",
-                    params: { id: String(habit.id) },
-                  })
-                }
-                minimal
-              />
-            ))}
-          </View>
-        )}
-      </ScrollView>
-    );
-  }
-
-  // ─── Normal UI ──────────────────────────────────────
   return (
     <ScrollView
       ref={scrollRef}
@@ -425,6 +234,38 @@ export default function TodayScreen() {
         </View>
       </View>
 
+      {detox && (
+        <Animated.View entering={FadeIn.duration(350)}>
+          <View style={[styles.detoxProtocolBanner, { backgroundColor: t.accent + "14", borderColor: t.accent + "50" }]}>
+            <View style={styles.detoxBannerContent}>
+              <View style={[styles.detoxBannerIconWrap, { backgroundColor: t.accent + "25" }]}>
+                <PlatformSymbol
+                  ios="shield.checkmark.fill"
+                  material="shield-check"
+                  tintColor={t.accent}
+                  size={26}
+                />
+              </View>
+              <View style={{ flex: 1, gap: 2 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                  <Heading variant="title3" color={t.accent}>
+                    🛡️ Detox Protocol Active
+                  </Heading>
+                  <View style={[styles.detoxStreakBadge, { backgroundColor: t.accent + "25" }]}>
+                    <Caption variant="caption2" color={t.accent} style={{ fontWeight: "700" }}>
+                      {detoxStreak} {detoxStreak === 1 ? "day streak" : "days streak"}
+                    </Caption>
+                  </View>
+                </View>
+                <Caption variant="caption2" color={t.textSecondary}>
+                  Strict discipline protocol engaged. Extra detox tasks are active in your {mode === "home" ? "Home" : "Hostel"} routine.
+                </Caption>
+              </View>
+            </View>
+          </View>
+        </Animated.View>
+      )}
+
       {focusLock && frequentOpenWarning && (
         <FocusLockBanner
           t={t}
@@ -449,15 +290,68 @@ export default function TodayScreen() {
         t={t}
       />
 
+      {activeChallenge && (
+        <Pressable
+          onPress={() => router.push("/(drawer)/(tabs)/challenges")}
+          style={({ pressed }) => [
+            styles.activeChallengeCard,
+            {
+              backgroundColor: t.card,
+              borderColor: t.accent + "40",
+            },
+            pressed && { opacity: 0.9 },
+          ]}
+        >
+          <View style={styles.activeChallengeHeader}>
+            <View style={[styles.activeChallengeIconWrap, { backgroundColor: t.accent + "18" }]}>
+              <PlatformSymbol
+                ios="flame.fill"
+                material="whatshot"
+                tintColor={t.accent}
+                size={16}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Caption variant="caption2" color={t.accent} style={{ fontWeight: "700", textTransform: "uppercase" }}>
+                Current Challenge #{activeChallenge.id}
+              </Caption>
+              <Heading variant="title3">{activeChallenge.name}</Heading>
+            </View>
+            <View style={[styles.activeChallengePill, { backgroundColor: t.accent + "18" }]}>
+              <Caption variant="caption2" color={t.accent} style={{ fontWeight: "700" }}>
+                Day {activeChallenge.progress}/{activeChallenge.duration}
+              </Caption>
+            </View>
+          </View>
+          <View style={[styles.activeChallengeTrack, { backgroundColor: t.background }]}>
+            <View
+              style={[
+                styles.activeChallengeBar,
+                {
+                  backgroundColor: t.accent,
+                  width: `${activeChallenge.duration > 0 ? Math.min(100, Math.round((activeChallenge.progress / activeChallenge.duration) * 100)) : 0}%`,
+                },
+              ]}
+            />
+          </View>
+          <View style={styles.activeChallengeFooter}>
+            <Caption variant="caption2" color={t.textMuted} numberOfLines={1} style={{ flex: 1 }}>
+              Complete ≥50% habits today to advance
+            </Caption>
+            <Caption variant="caption2" color={t.accent} style={{ fontWeight: "600" }}>
+              View Challenges →
+            </Caption>
+          </View>
+        </Pressable>
+      )}
+
       <UrgeToolsBar
         value={urgeToolsOn}
         onValueChange={handleUrgeToolsChange}
         t={t}
       />
       <UrgeRecoveryPanel
-        key={urgeSessionId ?? "off"}
         visible={urgeToolsOn}
-        sessionId={urgeSessionId}
         onLogged={() => loadHabits(true)}
         onAllComplete={() => handleUrgeToolsChange(false)}
         t={t}
@@ -594,36 +488,27 @@ export default function TodayScreen() {
         <View style={styles.habitList}>
           <View style={styles.sectionHeader}>
             <Body variant="headline" color={t.textSecondary}>
-              {homeOrderActive ? "Today's order" : "Habits"}
+              Habits
             </Body>
             <Caption variant="caption2" color={t.textMuted}>
               {completed}/{habits.length}
-              {homeOrderActive ? " · rest hide until tomorrow" : ""}
             </Caption>
           </View>
 
-          {homeOrderActive && visibleHabits.length === 0 && completed > 0 ? (
-            <Card animated style={styles.emptyCard}>
-              <Body variant="callout" color={t.textSecondary} style={styles.emptyText}>
-                All steps done for today. Streaks stay in sync — tomorrow the full order returns.
-              </Body>
-            </Card>
-          ) : (
-            visibleHabits.map((habit, index) => (
-              <HabitCard
-                key={habit.id}
-                habit={habit}
-                index={index}
-                onToggle={handleToggle}
-                onPress={() =>
-                  router.push({
-                    pathname: "/habitDetail",
-                    params: { id: String(habit.id) },
-                  })
-                }
-              />
-            ))
-          )}
+          {visibleHabits.map((habit, index) => (
+            <HabitCard
+              key={habit.id}
+              habit={habit}
+              index={index}
+              onToggle={handleToggle}
+              onPress={() =>
+                router.push({
+                  pathname: "/habitDetail",
+                  params: { id: String(habit.id) },
+                })
+              }
+            />
+          ))}
         </View>
       )}
     </ScrollView>
@@ -870,80 +755,80 @@ function DetoxToggle({
 
 // ─── Risk Meter ────────────────────────────────────────────────
 
-function RiskMeter({
-  score,
-  level,
-  color,
-  label,
-}: {
-  score: number;
-  level: string;
-  color: string;
-  label: string;
-}) {
-  const t = useAppTheme();
-  const animatedScore = useSharedValue(0);
+// function RiskMeter({
+//   score,
+//   level,
+//   color,
+//   label,
+// }: {
+//   score: number;
+//   level: string;
+//   color: string;
+//   label: string;
+// }) {
+//   const t = useAppTheme();
+//   const animatedScore = useSharedValue(0);
 
-  useEffect(() => {
-    animatedScore.value = withTiming(score / 100, {
-      duration: 800,
-      easing: Easing.out(Easing.cubic),
-    });
-  }, [score]);
+//   useEffect(() => {
+//     animatedScore.value = withTiming(score / 100, {
+//       duration: 800,
+//       easing: Easing.out(Easing.cubic),
+//     });
+//   }, [score]);
 
-  const fillStyle = useAnimatedStyle(() => ({
-    width: `${Math.min(animatedScore.value * 100, 100)}%`,
-  }));
+//   const fillStyle = useAnimatedStyle(() => ({
+//     width: `${Math.min(animatedScore.value * 100, 100)}%`,
+//   }));
 
-  const glowStyle = useAnimatedStyle(() => {
-    const bg = interpolateColor(
-      animatedScore.value,
-      [0, 0.3, 0.6, 1],
-      [
-        "rgba(74,222,128,0.08)",
-        "rgba(74,222,128,0.12)",
-        "rgba(245,158,11,0.12)",
-        "rgba(239,68,68,0.15)",
-      ],
-    );
-    return { backgroundColor: bg };
-  });
+//   const glowStyle = useAnimatedStyle(() => {
+//     const bg = interpolateColor(
+//       animatedScore.value,
+//       [0, 0.3, 0.6, 1],
+//       [
+//         "rgba(74,222,128,0.08)",
+//         "rgba(74,222,128,0.12)",
+//         "rgba(245,158,11,0.12)",
+//         "rgba(239,68,68,0.15)",
+//       ],
+//     );
+//     return { backgroundColor: bg };
+//   });
 
-  return (
-    <Animated.View
-      entering={FadeIn.duration(400)}
-      style={[styles.riskCard, glowStyle]}
-    >
-      <View style={styles.riskHeader}>
-        <View style={styles.riskLabelRow}>
-          <View style={[styles.riskDot, { backgroundColor: color }]} />
-          <Body variant="headline">{label}</Body>
-        </View>
-        <Heading variant="title2" color={color}>
-          {score}
-        </Heading>
-      </View>
+//   return (
+//     <Animated.View
+//       entering={FadeIn.duration(400)}
+//       style={[styles.riskCard, glowStyle]}
+//     >
+//       <View style={styles.riskHeader}>
+//         <View style={styles.riskLabelRow}>
+//           <View style={[styles.riskDot, { backgroundColor: color }]} />
+//           <Body variant="headline">{label}</Body>
+//         </View>
+//         <Heading variant="title2" color={color}>
+//           {score}
+//         </Heading>
+//       </View>
 
-      <View style={[styles.riskTrack, { backgroundColor: t.border }]}>
-        <Animated.View
-          style={[styles.riskFill, { backgroundColor: color }, fillStyle]}
-        />
-      </View>
+//       <View style={[styles.riskTrack, { backgroundColor: t.border }]}>
+//         <Animated.View
+//           style={[styles.riskFill, { backgroundColor: color }, fillStyle]}
+//         />
+//       </View>
 
-      <View style={styles.riskScale}>
-        <Caption variant="caption2" color={t.accent}>
-          Safe
-        </Caption>
-        <Caption variant="caption2" color={t.warning}>
-          Moderate
-        </Caption>
-        <Caption variant="caption2" color={t.danger}>
-          High
-        </Caption>
-      </View>
-    </Animated.View>
-  );
-}
+//       <View style={styles.riskScale}>
+//         <Caption variant="caption2" color={t.accent}>
+//           Safe
+//         </Caption>
+//         <Caption variant="caption2" color={t.warning}>
+//           Moderate
+//         </Caption>
+//         <Caption variant="caption2" color={t.danger}>
+//           High
+//         </Caption>
+//       </View>
+//     </Animated.View>
+//   );
+// }
 
 // ─── Recovery Actions ──────────────────────────────────────────
 
@@ -956,7 +841,7 @@ const RECOVERY_ACTIONS = [
   },
   {
     label: 'Do pushups',
-    icon: { ios: 'figure.strengthtraining.traditional', android: 'fitness_center', web: 'fitness_center' },
+    icon: { ios: 'figure.strengthtraining.traditional', android: 'fitness-center', web: 'fitness-center' },
     material: 'fitness-center',
     color: '#22D3EE',
   },
@@ -974,7 +859,7 @@ const RECOVERY_ACTIONS = [
   },
   {
     label: 'Pray',
-    icon: { ios: 'moon.stars.fill', android: 'self_improvement', web: 'self_improvement' },
+    icon: { ios: 'moon.stars.fill', android: 'self-improvement', web: 'self-improvement' },
     material: 'hands-pray',
     color: '#A78BFA',
   },
@@ -1080,37 +965,58 @@ function UrgeToolsBar({
 
 function UrgeRecoveryPanel({
   visible,
-  sessionId,
   onLogged,
   onAllComplete,
   t,
 }: {
   visible: boolean;
-  sessionId: number | null;
   onLogged: () => void;
   onAllComplete: () => void;
   t: ReturnType<typeof useAppTheme>;
 }) {
   const [completedActions, setCompletedActions] = useState<Set<string>>(new Set());
 
+  // Load today's already completed recovery actions from interventions/{YYYY-MM-DD}
   useEffect(() => {
-    setCompletedActions(new Set());
-  }, [sessionId]);
+    if (visible) {
+      getDailyIntervention()
+        .then((doc) => {
+          if (doc && Array.isArray(doc.actions)) {
+            const doneLabels = doc.actions
+              .filter((a) => a.completed)
+              .map((a) => a.action || a.actionName)
+              .filter(Boolean) as string[];
+            if (doneLabels.length > 0) {
+              setCompletedActions(new Set(doneLabels));
+            }
+          }
+        })
+        .catch(() => { });
+    }
+  }, [visible]);
 
-  if (!visible || sessionId == null) return null;
+  if (!visible) return null;
 
   const handlePickAction = async (label: string) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const interventionId = await addIntervention(label);
-    await completeIntervention(interventionId);
-    await recordUrgeToolActionCompletion(sessionId, label);
+
+    // Optimistically update UI immediately
     let nextSize = 0;
     setCompletedActions((prev) => {
       const next = new Set(prev).add(label);
       nextSize = next.size;
       return next;
     });
+
     onLogged();
+
+    // Persist to interventions/{YYYY-MM-DD} single daily document
+    try {
+      await recordDailyInterventionAction(label, RECOVERY_ACTIONS.length);
+    } catch (e) {
+      console.warn("Failed to record recovery intervention:", e);
+    }
+
     if (nextSize >= RECOVERY_ACTIONS.length) {
       Alert.alert(
         "Proud of you",
@@ -1176,142 +1082,142 @@ function UrgeRecoveryPanel({
 
 // ─── Alert Card ────────────────────────────────────────────────
 
-function AlertCard({
-  intervention,
-  onActionComplete,
-}: {
-  intervention: { title: string; body: string; action: string };
-  onActionComplete: () => void;
-}) {
-  const t = useAppTheme();
-  const [expanded, setExpanded] = useState(false);
-  const [completedActions, setCompletedActions] = useState<Set<string>>(new Set());
-  const pulseOpacity = useSharedValue(1);
+// function AlertCard({
+//   intervention,
+//   onActionComplete,
+// }: {
+//   intervention: { title: string; body: string; action: string };
+//   onActionComplete: () => void;
+// }) {
+//   const t = useAppTheme();
+//   const [expanded, setExpanded] = useState(false);
+//   const [completedActions, setCompletedActions] = useState<Set<string>>(new Set());
+//   const pulseOpacity = useSharedValue(1);
 
-  useEffect(() => {
-    const pulse = () => {
-      pulseOpacity.value = withTiming(0.6, { duration: 1000 }, () => {
-        pulseOpacity.value = withTiming(1, { duration: 1000 });
-      });
-    };
-    pulse();
-    const interval = setInterval(pulse, 2000);
-    return () => clearInterval(interval);
-  }, []);
+//   useEffect(() => {
+//     const pulse = () => {
+//       pulseOpacity.value = withTiming(0.6, { duration: 1000 }, () => {
+//         pulseOpacity.value = withTiming(1, { duration: 1000 });
+//       });
+//     };
+//     pulse();
+//     const interval = setInterval(pulse, 2000);
+//     return () => clearInterval(interval);
+//   }, []);
 
-  const pulseStyle = useAnimatedStyle(() => ({
-    opacity: pulseOpacity.value,
-  }));
+//   const pulseStyle = useAnimatedStyle(() => ({
+//     opacity: pulseOpacity.value,
+//   }));
 
-  const handleStartRecovery = () => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    setExpanded(true);
-  };
+//   const handleStartRecovery = () => {
+//     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+//     setExpanded(true);
+//   };
 
-  const handlePickAction = async (label: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+//   const handlePickAction = async (label: string) => {
+//     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-    const id = await addIntervention(label);
-    await completeIntervention(id);
+//     const id = await addIntervention(label);
+//     await completeIntervention(id);
 
-    setCompletedActions((prev) => new Set(prev).add(label));
-    onActionComplete();
-  };
+//     setCompletedActions((prev) => new Set(prev).add(label));
+//     onActionComplete();
+//   };
 
-  return (
-    <Animated.View
-      entering={FadeInUp.springify().damping(16)}
-      style={[styles.alertCard, { backgroundColor: t.dangerMuted }]}
-    >
-      <Animated.View style={[styles.alertIconCircle, pulseStyle]}>
-        <PlatformSymbol
-          ios="exclamationmark.triangle.fill"
-          material="alert"
-          tintColor={t.danger}
-          size={24}
-        />
-      </Animated.View>
+//   return (
+//     <Animated.View
+//       entering={FadeInUp.springify().damping(16)}
+//       style={[styles.alertCard, { backgroundColor: t.dangerMuted }]}
+//     >
+//       <Animated.View style={[styles.alertIconCircle, pulseStyle]}>
+//         <PlatformSymbol
+//           ios="exclamationmark.triangle.fill"
+//           material="alert"
+//           tintColor={t.danger}
+//           size={24}
+//         />
+//       </Animated.View>
 
-      <Heading variant="title3" color={t.danger}>
-        {expanded ? 'Pick a recovery action' : intervention.title}
-      </Heading>
+//       <Heading variant="title3" color={t.danger}>
+//         {expanded ? 'Pick a recovery action' : intervention.title}
+//       </Heading>
 
-      {!expanded && (
-        <Body variant="callout" color={t.textSecondary} style={styles.alertBody}>
-          {intervention.body}
-        </Body>
-      )}
+//       {!expanded && (
+//         <Body variant="callout" color={t.textSecondary} style={styles.alertBody}>
+//           {intervention.body}
+//         </Body>
+//       )}
 
-      {expanded ? (
-        <View style={styles.actionList}>
-          {RECOVERY_ACTIONS.map((action, i) => {
-            const done = completedActions.has(action.label);
-            return (
-              <Animated.View
-                key={action.label}
-                entering={FadeInDown.delay(i * 60).springify().damping(18)}
-              >
-                <Pressable
-                  style={[
-                    styles.actionRow,
-                    { backgroundColor: done ? action.color + '18' : t.card },
-                    done && { borderColor: action.color, borderWidth: 1 },
-                  ]}
-                  onPress={() => !done && handlePickAction(action.label)}
-                  disabled={done}
-                >
-                  <View style={[styles.actionIcon, { backgroundColor: action.color + '22' }]}>
-                    <PlatformSymbol
-                      ios={action.icon.ios}
-                      material={action.material}
-                      tintColor={action.color}
-                      size={18}
-                    />
-                  </View>
-                  <Body variant="bodyMedium" style={{ flex: 1, opacity: done ? 0.5 : 1 }}>
-                    {action.label}
-                  </Body>
-                  {done ? (
-                    <View style={[styles.actionCheck, { backgroundColor: action.color }]}>
-                      <PlatformSymbol
-                        ios="checkmark"
-                        material="check"
-                        tintColor="#fff"
-                        size={12}
-                      />
-                    </View>
-                  ) : (
-                    <PlatformSymbol
-                      ios="chevron.right"
-                      material="chevron-right"
-                      tintColor={t.textMuted}
-                      size={14}
-                    />
-                  )}
-                </Pressable>
-              </Animated.View>
-            );
-          })}
-        </View>
-      ) : (
-        <Pressable
-          style={[styles.recoveryBtn, { backgroundColor: t.danger }]}
-          onPress={handleStartRecovery}
-        >
-          <PlatformSymbol
-            ios="arrow.counterclockwise"
-            material="refresh"
-            tintColor="#fff"
-            size={16}
-          />
-          <Body variant="headline" color="#fff">
-            Start Recovery
-          </Body>
-        </Pressable>
-      )}
-    </Animated.View>
-  );
-}
+//       {expanded ? (
+//         <View style={styles.actionList}>
+//           {RECOVERY_ACTIONS.map((action, i) => {
+//             const done = completedActions.has(action.label);
+//             return (
+//               <Animated.View
+//                 key={action.label}
+//                 entering={FadeInDown.delay(i * 60).springify().damping(18)}
+//               >
+//                 <Pressable
+//                   style={[
+//                     styles.actionRow,
+//                     { backgroundColor: done ? action.color + '18' : t.card },
+//                     done && { borderColor: action.color, borderWidth: 1 },
+//                   ]}
+//                   onPress={() => !done && handlePickAction(action.label)}
+//                   disabled={done}
+//                 >
+//                   <View style={[styles.actionIcon, { backgroundColor: action.color + '22' }]}>
+//                     <PlatformSymbol
+//                       ios={action.icon.ios}
+//                       material={action.material}
+//                       tintColor={action.color}
+//                       size={18}
+//                     />
+//                   </View>
+//                   <Body variant="bodyMedium" style={{ flex: 1, opacity: done ? 0.5 : 1 }}>
+//                     {action.label}
+//                   </Body>
+//                   {done ? (
+//                     <View style={[styles.actionCheck, { backgroundColor: action.color }]}>
+//                       <PlatformSymbol
+//                         ios="checkmark"
+//                         material="check"
+//                         tintColor="#fff"
+//                         size={12}
+//                       />
+//                     </View>
+//                   ) : (
+//                     <PlatformSymbol
+//                       ios="chevron.right"
+//                       material="chevron-right"
+//                       tintColor={t.textMuted}
+//                       size={14}
+//                     />
+//                   )}
+//                 </Pressable>
+//               </Animated.View>
+//             );
+//           })}
+//         </View>
+//       ) : (
+//         <Pressable
+//           style={[styles.recoveryBtn, { backgroundColor: t.danger }]}
+//           onPress={handleStartRecovery}
+//         >
+//           <PlatformSymbol
+//             ios="arrow.counterclockwise"
+//             material="refresh"
+//             tintColor="#fff"
+//             size={16}
+//           />
+//           <Body variant="headline" color="#fff">
+//             Start Recovery
+//           </Body>
+//         </Pressable>
+//       )}
+//     </Animated.View>
+//   );
+// }
 
 // ─── Animated Progress Bar ─────────────────────────────────────
 
@@ -1472,13 +1378,31 @@ function HabitCard({
               </Animated.View>
 
               <View style={styles.habitTitleCol}>
-                <Body
-                  variant="bodyMedium"
-                  numberOfLines={2}
-                  style={isDone ? styles.doneText : undefined}
-                >
-                  {habit.name}
-                </Body>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <Body
+                    variant="bodyMedium"
+                    numberOfLines={2}
+                    style={isDone ? styles.doneText : undefined}
+                  >
+                    {habit.name}
+                  </Body>
+                  {habit.detoxOnly && (
+                    <View
+                      style={{
+                        backgroundColor: "#10B98120",
+                        borderColor: "#10B98155",
+                        borderWidth: 1,
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Caption variant="caption2" color="#10B981" style={{ fontWeight: "700" }}>
+                        🛡️ Detox
+                      </Caption>
+                    </View>
+                  )}
+                </View>
                 {habit.targetPerDay > 1 && !minimal && (
                   <Caption variant="caption2" color={t.textMuted}>
                     Target: {habit.targetPerDay}x daily
@@ -1661,6 +1585,30 @@ const styles = StyleSheet.create({
   },
   detoxLabel: {
     fontWeight: "600",
+  },
+  detoxProtocolBanner: {
+    borderRadius: radius.xl,
+    borderWidth: 1.5,
+    padding: spacing.md,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  detoxBannerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+  },
+  detoxBannerIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  detoxStreakBadge: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radius.full,
   },
 
   // Detox hero
@@ -1918,5 +1866,44 @@ const styles = StyleSheet.create({
   },
   habitBarTrack: {
     width: "100%",
+  },
+  activeChallengeCard: {
+    borderRadius: radius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    gap: spacing.sm,
+  },
+  activeChallengeHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  activeChallengeIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  activeChallengePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.full,
+  },
+  activeChallengeTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: "hidden",
+    marginVertical: 4,
+  },
+  activeChallengeBar: {
+    height: "100%",
+    borderRadius: 3,
+  },
+  activeChallengeFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: spacing.sm,
   },
 });

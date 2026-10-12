@@ -8,6 +8,7 @@ export interface HabitIcon {
   ios: string;
   android: string;
   web: string;
+  library?: 'MaterialCommunityIcons' | 'AntDesign' | 'Ionicons' | 'MaterialIcons';
 }
 
 /** Catalog row for achievements (Firestore `achievement_defs` + UI). */
@@ -32,6 +33,8 @@ export interface Habit {
   /** Lower sorts first; used for Home daily order. */
   sortOrder: number;
   createdAt: string;
+  /** True if this habit is an extra task activated during Detox Protocol */
+  detoxOnly?: boolean;
 }
 
 export function parseHabitIcon(raw: string): HabitIcon {
@@ -54,6 +57,7 @@ export interface DailyHabitEntry {
   name: string;
   completed: boolean;
   time: string | null;
+  detoxOnly?: boolean;
 }
 
 export interface DailyProgressEntry {
@@ -65,6 +69,23 @@ export interface DailyProgressEntry {
   completionPercentage: number;
   motivationalMessage: string;
   habits: DailyHabitEntry[];
+  isDetoxDay?: boolean;
+  updatedAt?: any;
+}
+
+export interface RecoveryActionEntry {
+  action: string;
+  actionName?: string;
+  completed: boolean;
+  timestamp: string;
+}
+
+export interface DailyInterventionDoc {
+  date: string;
+  totalActions: number;
+  completedActions: number;
+  leftActions: number;
+  actions: RecoveryActionEntry[];
   updatedAt?: any;
 }
 
@@ -75,8 +96,14 @@ export interface Metrics {
   relapse: number; // 0 | 1
   /** Minutes slept (logged on Body screen). */
   sleepMinutes: number;
-  /** Step count for the day (manual log). */
+  /** Step count for the day. */
   steps: number;
+  /** Water glasses consumed today (250ml each). */
+  waterGlasses?: number;
+  /** Height in centimeters for BMI. */
+  heightCm?: number;
+  /** Weight in kilograms. */
+  weightKg?: number;
 }
 
 export interface ModeRow {
@@ -95,6 +122,8 @@ export type ChallengeCategory =
   | 'consistency'
   | 'special';
 
+export type ChallengeStatus = 'locked' | 'active' | 'completed';
+
 export interface Challenge {
   id: number;
   /** Stable id from catalog (e.g. streak_7). */
@@ -110,6 +139,39 @@ export interface Challenge {
   rules: string;
   difficulty?: ChallengeDifficulty;
   xp?: number;
+  status?: ChallengeStatus;
+}
+
+/** An item in the completedChallenges array inside users/{uid}/challenges/state. */
+export interface CompletedChallengeItem {
+  id: number;
+  defId: string;
+  name: string;
+  duration: number;
+  xp: number;
+  completedAt: string;
+}
+
+/** Single consolidated document at users/{uid}/challenges/state */
+export interface ChallengesStateDoc {
+  activeChallengeId: number;
+  currentProgress: number;
+  lastCompletedDate: string | null;
+  completedChallenges: CompletedChallengeItem[];
+  updatedAt?: any;
+}
+
+/** An item in the unlockedAchievements array inside users/{uid}/achievements/state. */
+export interface UnlockedAchievementItem {
+  id: string; // defId (e.g. "streak_1")
+  title: string;
+  unlockedAt: string;
+}
+
+/** Single consolidated document at users/{uid}/achievements/state */
+export interface AchievementsStateDoc {
+  unlockedAchievements: UnlockedAchievementItem[];
+  updatedAt?: any;
 }
 
 /** One finished challenge run (persisted; not removed on template reset). */

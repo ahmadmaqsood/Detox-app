@@ -1,7 +1,7 @@
 import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import * as Haptics from "expo-haptics";
 import { useFocusEffect, useNavigation, useRouter } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   Alert,
   Pressable,
@@ -21,7 +21,7 @@ import { HabitsLoadingSkeleton } from "@/components/HabitSkeleton";
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Body, Caption, Heading } from "@/components/Typography";
-import { deleteHabit, getAllHabits } from "@/lib/firestoreDatabase";
+import { deleteHabit, getAllHabits, reorderHabits } from "@/lib/firestoreDatabase";
 import { parseHabitIcon, type Habit, type LifeArea } from "@/lib/types";
 import { useMode } from "@/store/ModeContext";
 import { useAppTheme } from "@/theme";
@@ -56,8 +56,14 @@ export default function HabitsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const loadData = useCallback(async () => {
+  const habitsRef = useRef<Habit[]>([]);
+  habitsRef.current = habits;
+
+  const loadData = useCallback(async (silent = false) => {
     try {
+      if (!silent && habitsRef.current.length === 0) {
+        setLoading(true);
+      }
       const all = await getAllHabits();
       setHabits(all);
     } catch (e) {
@@ -70,13 +76,14 @@ export default function HabitsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
+      const hasExistingHabits = habitsRef.current.length > 0;
+      loadData(hasExistingHabits);
     }, [loadData]),
   );
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    loadData();
+    loadData(false);
   }, [loadData]);
 
   const handleDelete = (habit: Habit) => {
@@ -121,6 +128,32 @@ export default function HabitsScreen() {
       pathname: "/addHabit",
       params: { mode: targetMode },
     });
+  };
+
+  const handleMove = async (habitId: number, direction: "up" | "down") => {
+    const list = [...filteredHabits];
+    const index = list.findIndex((h) => h.id === habitId);
+    if (index === -1) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= list.length) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const item = list[index];
+    list[index] = list[targetIndex];
+    list[targetIndex] = item;
+
+    const reorderedIds = list.map((h) => h.id);
+    setHabits((prev) => {
+      const other = prev.filter((h) => !reorderedIds.includes(h.id));
+      return [...list, ...other];
+    });
+
+    try {
+      await reorderHabits(reorderedIds);
+    } catch (e) {
+      console.error("Failed to reorder habits:", e);
+      loadData();
+    }
   };
 
   // Filtered list
@@ -395,6 +428,24 @@ export default function HabitsScreen() {
                             </View>
                           )}
 
+                          {/* Detox Badge */}
+                          {habit.detoxOnly && (
+                            <View
+                              style={[
+                                styles.areaBadge,
+                                { backgroundColor: "#10B98118", borderColor: "#10B98150", borderWidth: 1 },
+                              ]}
+                            >
+                              <Caption
+                                variant="caption2"
+                                color="#10B981"
+                                style={{ fontWeight: "700" }}
+                              >
+                                🛡️ DETOX
+                              </Caption>
+                            </View>
+                          )}
+
                           {/* Target */}
                           <Caption variant="caption2" color={t.textMuted}>
                             {habit.targetPerDay ?? 1}x daily
@@ -405,6 +456,48 @@ export default function HabitsScreen() {
 
                     {/* Action Buttons Row */}
                     <View style={[styles.cardActionsRow, { borderTopColor: t.border }]}>
+                      {!search.trim() && filter !== "all" && (
+                        <>
+                          <Pressable
+                            style={[styles.actionBtn, index === 0 && { opacity: 0.25 }]}
+                            disabled={index === 0}
+                            onPress={() => handleMove(habit.id, "up")}
+                            hitSlop={8}
+                          >
+                            <PlatformSymbol
+                              ios="arrow.up"
+                              material="arrow-upward"
+                              tintColor={t.textPrimary}
+                              size={15}
+                            />
+                            <Body variant="subhead" color={t.textPrimary} style={{ fontWeight: "600" }}>
+                              Up
+                            </Body>
+                          </Pressable>
+
+                          <View style={[styles.actionDivider, { backgroundColor: t.border }]} />
+
+                          <Pressable
+                            style={[styles.actionBtn, index === filteredHabits.length - 1 && { opacity: 0.25 }]}
+                            disabled={index === filteredHabits.length - 1}
+                            onPress={() => handleMove(habit.id, "down")}
+                            hitSlop={8}
+                          >
+                            <PlatformSymbol
+                              ios="arrow.down"
+                              material="arrow-downward"
+                              tintColor={t.textPrimary}
+                              size={15}
+                            />
+                            <Body variant="subhead" color={t.textPrimary} style={{ fontWeight: "600" }}>
+                              Down
+                            </Body>
+                          </Pressable>
+
+                          <View style={[styles.actionDivider, { backgroundColor: t.border }]} />
+                        </>
+                      )}
+
                       <Pressable
                         style={styles.actionBtn}
                         onPress={() => handleEdit(habit)}

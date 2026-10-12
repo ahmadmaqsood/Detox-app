@@ -1,67 +1,52 @@
-import { useCallback, useEffect, useState } from 'react';
+import { HabitIconView } from '@/components/HabitIconView';
+import { PlatformSymbol } from '@/components/PlatformSymbol';
+import * as Haptics from 'expo-haptics';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   TextInput,
   View,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { HabitIconView } from '@/components/HabitIconView';
-import { PlatformSymbol } from '@/components/PlatformSymbol';
-import * as Haptics from 'expo-haptics';
 import Animated, {
   FadeIn,
   FadeInDown,
   FadeInUp,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
-  withTiming,
+  withSpring
 } from 'react-native-reanimated';
 
-import { useAppTheme } from '@/theme';
-import { spacing, radius } from '@/theme/spacing';
-import { typography } from '@/theme/typography';
-import { Card } from '@/components/Card';
 import { Button } from '@/components/Button';
+import { Card } from '@/components/Card';
 import { Body, Caption, Heading } from '@/components/Typography';
 import {
   deleteHabit,
   getHabitById,
   getHabitCompletionRate,
   getHabitHistory,
-  getStreak,
   getLongestStreak,
+  getStreak,
   updateHabit,
 } from "@/lib/firestoreDatabase";
-import { parseHabitIcon } from '@/lib/types';
 import type { Habit, HabitIcon, LifeArea, Mode } from '@/lib/types';
+import { parseHabitIcon } from '@/lib/types';
+import { useAppTheme } from '@/theme';
+import { radius, spacing } from '@/theme/spacing';
+import { typography } from '@/theme/typography';
+import {
+  HABIT_ICON_OPTIONS,
+  ICON_CATEGORIES,
+  type HabitIconOption,
+  type IconCategory,
+} from '@/constants/habitIcons';
 
-// ─── Icon & color catalogs (shared with addHabit) ──────────────
-
-const ICON_OPTIONS: { icon: HabitIcon; label: string }[] = [
-  { icon: { ios: 'shield.checkmark.fill', android: 'shield', web: 'shield' }, label: 'Shield' },
-  { icon: { ios: 'figure.walk', android: 'directions_walk', web: 'directions_walk' }, label: 'Walk' },
-  { icon: { ios: 'dumbbell.fill', android: 'fitness_center', web: 'fitness_center' }, label: 'Gym' },
-  { icon: { ios: 'moon.stars.fill', android: 'self_improvement', web: 'self_improvement' }, label: 'Pray' },
-  { icon: { ios: 'book.fill', android: 'menu_book', web: 'menu_book' }, label: 'Read' },
-  { icon: { ios: 'bed.double.fill', android: 'hotel', web: 'hotel' }, label: 'Sleep' },
-  { icon: { ios: 'sunrise.fill', android: 'wb_twilight', web: 'wb_twilight' }, label: 'Morning' },
-  { icon: { ios: 'moon.fill', android: 'nightlight', web: 'nightlight' }, label: 'Night' },
-  { icon: { ios: 'brain.head.profile.fill', android: 'psychology', web: 'psychology' }, label: 'Focus' },
-  { icon: { ios: 'clock.badge.checkmark.fill', android: 'schedule', web: 'schedule' }, label: 'Timer' },
-  { icon: { ios: 'drop.fill', android: 'water_drop', web: 'water_drop' }, label: 'Water' },
-  { icon: { ios: 'heart.fill', android: 'favorite', web: 'favorite' }, label: 'Heart' },
-  { icon: { ios: 'leaf.fill', android: 'eco', web: 'eco' }, label: 'Nature' },
-  { icon: { ios: 'xmark.app.fill', android: 'block', web: 'block' }, label: 'Block' },
-  { icon: { ios: 'play.slash.fill', android: 'videocam_off', web: 'videocam_off' }, label: 'No Video' },
-  { icon: { ios: 'iphone.slash', android: 'phonelink_off', web: 'phonelink_off' }, label: 'No Phone' },
-  { icon: { ios: 'pencil.line', android: 'edit', web: 'edit' }, label: 'Journal' },
-  { icon: { ios: 'star.fill', android: 'star', web: 'star' }, label: 'Star' },
-];
+// ─── Color palette & catalogs ──────────────────────────────────
 
 const COLOR_OPTIONS = [
   '#4ADE80', '#34D399', '#22D3EE', '#60A5FA',
@@ -88,10 +73,10 @@ function lifeAreaLabel(area: LifeArea): string {
 // ─── Helpers ───────────────────────────────────────────────────
 
 function iconIndex(icon: HabitIcon): number {
-  const idx = ICON_OPTIONS.findIndex(
-    (o) => o.icon.ios === icon.ios && o.icon.android === icon.android
+  const idx = HABIT_ICON_OPTIONS.findIndex(
+    (o) => o.icon.android === icon.android || o.icon.ios === icon.ios
   );
-  return idx >= 0 ? idx : 17; // default Star
+  return idx >= 0 ? idx : 0;
 }
 
 function colorIndex(color: string): number {
@@ -132,12 +117,21 @@ export default function HabitDetailScreen() {
   // Edit state
   const [editName, setEditName] = useState('');
   const [editIconIdx, setEditIconIdx] = useState(0);
+  const [editIconCategory, setEditIconCategory] = useState<IconCategory>('all');
   const [editColorIdx, setEditColorIdx] = useState(0);
   const [editMode, setEditMode] = useState<Mode>('hostel');
   const [editLifeArea, setEditLifeArea] = useState<LifeArea>('mental');
   const [editTarget, setEditTarget] = useState(1);
+  const [editDetoxOnly, setEditDetoxOnly] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  const selectedEditOption = HABIT_ICON_OPTIONS[editIconIdx] ?? HABIT_ICON_OPTIONS[0];
+
+  const displayedEditIcons = useMemo(() => {
+    if (editIconCategory === 'all') return HABIT_ICON_OPTIONS;
+    return HABIT_ICON_OPTIONS.filter((opt) => opt.category === editIconCategory);
+  }, [editIconCategory]);
 
   const habitId = id ? Number(id) : null;
 
@@ -171,6 +165,7 @@ export default function HabitDetailScreen() {
         setEditMode(h.mode);
         setEditLifeArea(h.lifeArea ?? 'mental');
         setEditTarget(h.targetPerDay);
+        setEditDetoxOnly(Boolean(h.detoxOnly));
       } else {
         setLoadError("Habit not found");
       }
@@ -193,11 +188,12 @@ export default function HabitDetailScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await updateHabit(habitId, {
         name: editName.trim(),
-        icon: ICON_OPTIONS[editIconIdx].icon,
+        icon: HABIT_ICON_OPTIONS[editIconIdx].icon,
         color: COLOR_OPTIONS[editColorIdx],
         mode: editMode,
         lifeArea: editLifeArea,
         targetPerDay: editTarget,
+        detoxOnly: editDetoxOnly,
       });
       setEditing(false);
       loadData();
@@ -260,7 +256,7 @@ export default function HabitDetailScreen() {
   const parsedIcon = parseHabitIcon(habit.icon);
   const habitColor = habit.color;
 
-  const activeIcon = editing ? ICON_OPTIONS[editIconIdx].icon : parsedIcon;
+  const activeIcon = editing ? HABIT_ICON_OPTIONS[editIconIdx].icon : parsedIcon;
   const activeColor = editing ? COLOR_OPTIONS[editColorIdx] : habitColor;
   const activeName = editing ? editName || 'Habit Name' : habit.name;
 
@@ -287,6 +283,13 @@ export default function HabitDetailScreen() {
             {(editing ? editMode : habit.mode)} · {editing ? editTarget : habit.targetPerDay}x daily · since{' '}
             {formatDate(habit.createdAt)}
           </Caption>
+          {(editing ? editDetoxOnly : habit.detoxOnly) && (
+            <View style={{ marginTop: spacing.sm, backgroundColor: '#10B98120', borderColor: '#10B98160', borderWidth: 1, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, alignSelf: 'center' }}>
+              <Caption variant="caption2" color="#10B981" style={{ fontWeight: '700' }}>
+                🛡️ Detox Protocol Task
+              </Caption>
+            </View>
+          )}
         </View>
       </Animated.View>
 
@@ -413,18 +416,60 @@ export default function HabitDetailScreen() {
 
             {/* Icon picker */}
             <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                ICON
-              </Caption>
-              <View style={styles.iconGrid}>
-                {ICON_OPTIONS.map((opt, i) => {
-                  const active = i === editIconIdx;
+              <View style={styles.sectionHeaderRow}>
+                <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
+                  ICON
+                </Caption>
+                <Caption variant="caption1" color={COLOR_OPTIONS[editColorIdx]} style={styles.iconSelectedBadge}>
+                  {selectedEditOption.label}
+                </Caption>
+              </View>
+
+              {/* Category Filter Chips */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.categoryScroll}
+              >
+                {ICON_CATEGORIES.map((cat) => {
+                  const active = editIconCategory === cat.id;
                   return (
                     <Pressable
-                      key={i}
+                      key={cat.id}
                       onPress={() => {
                         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditIconIdx(i);
+                        setEditIconCategory(cat.id);
+                      }}
+                      style={[
+                        styles.categoryChip,
+                        {
+                          backgroundColor: active ? COLOR_OPTIONS[editColorIdx] : t.card,
+                          borderColor: active ? COLOR_OPTIONS[editColorIdx] : t.border,
+                        },
+                      ]}
+                    >
+                      <Caption
+                        variant="caption2"
+                        color={active ? '#FFFFFF' : t.textSecondary}
+                        style={active && { fontWeight: '700' }}
+                      >
+                        {cat.label}
+                      </Caption>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={styles.iconGrid}>
+                {displayedEditIcons.map((opt) => {
+                  const globalIdx = HABIT_ICON_OPTIONS.findIndex((o) => o === opt);
+                  const active = globalIdx === editIconIdx;
+                  return (
+                    <Pressable
+                      key={opt.label}
+                      onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setEditIconIdx(globalIdx);
                       }}
                       style={[
                         styles.iconCell,
@@ -435,7 +480,7 @@ export default function HabitDetailScreen() {
                       <HabitIconView
                         icon={opt.icon}
                         color={active ? COLOR_OPTIONS[editColorIdx] : t.textMuted}
-                        size={18}
+                        size={20}
                       />
                     </Pressable>
                   );
@@ -575,6 +620,27 @@ export default function HabitDetailScreen() {
               </View>
             </View>
 
+            {/* ─── Detox Protocol Task ──────────────── */}
+            <View style={styles.editField}>
+              <View style={[styles.switchCard, { backgroundColor: t.background }]}>
+                <View style={{ flex: 1, paddingRight: spacing.md }}>
+                  <Heading variant="title3">🛡️ Detox Protocol Task</Heading>
+                  <Caption variant="caption2" color={t.textMuted} style={{ marginTop: spacing.xxs }}>
+                    When enabled, this habit only activates during Detox Mode days.
+                  </Caption>
+                </View>
+                <Switch
+                  value={editDetoxOnly}
+                  onValueChange={(val) => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setEditDetoxOnly(val);
+                  }}
+                  trackColor={{ false: t.border, true: t.accent }}
+                  thumbColor="#FFFFFF"
+                />
+              </View>
+            </View>
+
             <View style={styles.editActions}>
               <Button
                 title="Save Changes"
@@ -595,6 +661,7 @@ export default function HabitDetailScreen() {
                     setEditMode(habit.mode);
                     setEditLifeArea(habit.lifeArea ?? 'mental');
                     setEditTarget(habit.targetPerDay);
+                    setEditDetoxOnly(Boolean(habit.detoxOnly));
                   }
                   setEditing(false);
                 }}
@@ -847,6 +914,24 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 0.8,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  iconSelectedBadge: {
+    fontWeight: '700',
+  },
+  categoryScroll: {
+    gap: spacing.xs,
+    paddingVertical: spacing.xxs,
+  },
+  categoryChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
   editInput: {
     borderWidth: 1,
     borderRadius: radius.md,
@@ -908,6 +993,13 @@ const styles = StyleSheet.create({
   stepperValue: {
     flex: 1,
     alignItems: 'center',
+  },
+  switchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: spacing.md,
+    borderRadius: radius.md,
   },
   editActions: {
     gap: spacing.md,

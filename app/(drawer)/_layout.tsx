@@ -31,14 +31,14 @@ interface DrawerItem {
 
 const DRAWER_ITEMS: DrawerItem[] = [
   {
-    label: "Today",
+    label: "Home",
     route: "/(drawer)/(tabs)/today",
-    icon: { ios: "sun.max.fill", material: "weather-sunny" },
+    icon: { ios: "sun.max.fill", material: "dashboard" },
   },
   {
     label: "Habits",
     route: "/(drawer)/habits",
-    icon: { ios: "checklist", material: "format-list-checks" },
+    icon: { ios: "checklist", material: "task-alt" },
   },
   {
     label: "Life Hub",
@@ -63,7 +63,7 @@ const DRAWER_ITEMS: DrawerItem[] = [
   {
     label: "Achievements",
     route: "/(drawer)/achievements",
-    icon: { ios: "star.circle.fill", material: "trophy-award" },
+    icon: { ios: "star.circle.fill", material: "celebration" },
   },
   {
     label: "Spiritual",
@@ -94,6 +94,11 @@ const DRAWER_ITEMS: DrawerItem[] = [
     label: "Focus mode",
     route: "/(drawer)/focusMode",
     icon: { ios: "lock.shield.fill", material: "shield-lock" },
+  },
+  {
+    label: "App Timers",
+    route: "/(drawer)/appUsage",
+    icon: { ios: "hourglass", material: "hourglass-top" },
   },
   {
     label: "Settings",
@@ -143,6 +148,7 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
     if (item.label === "Focus mode" && pathname === "/focusMode") return true;
     if (item.label === "Body" && pathname === "/body") return true;
     if (item.label === "Diet" && pathname === "/diet") return true;
+    if (item.label === "App Timers" && pathname === "/appUsage") return true;
     return false;
   };
 
@@ -232,8 +238,8 @@ function DrawerItemRow({
       entering={FadeInLeft.delay(60 + index * 40)
         .springify()
         .damping(18)}
-      style={animStyle}
     >
+      <Animated.View style={animStyle}>
       <Pressable
         onPressIn={() => {
           scale.value = withSpring(0.97, { damping: 15, stiffness: 300 });
@@ -284,6 +290,7 @@ function DrawerItemRow({
           <View style={[styles.activeDot, { backgroundColor: t.accent }]} />
         )}
       </Pressable>
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -325,6 +332,10 @@ export default function DrawerLayout() {
       />
       <Drawer.Screen
         name="focusMode"
+        options={{ drawerItemStyle: { display: "none" } }}
+      />
+      <Drawer.Screen
+        name="appUsage"
         options={{ drawerItemStyle: { display: "none" } }}
       />
       <Drawer.Screen

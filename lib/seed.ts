@@ -179,7 +179,7 @@ export const homeRoutineHabitsV3: SeedHabit[] = [
     sortOrder: 180,
   },
   {
-    name: 'Sleep before 10 pm',
+    name: 'Sleep before 11 pm',
     icon: { ios: 'bed.double.fill', android: 'hotel', web: 'hotel' },
     color: '#6366F1',
     mode: 'home',
@@ -206,7 +206,7 @@ const hostelHabits: SeedHabit[] = [
     mode: 'hostel',
     targetPerDay: 1,
     lifeArea: 'mental',
-    sortOrder: 10,  
+    sortOrder: 10,
   },
   {
     name: 'Office Work',
@@ -228,7 +228,7 @@ const hostelHabits: SeedHabit[] = [
   },
   {
     name: 'Namaz',
-    icon: { ios: 'moon.stars.fill', android: 'self_improvement', web: 'self_improvement' },
+    icon: { ios: 'moon.stars.fill', android: 'self-improvement', web: 'self-improvement' },
     color: '#4ADE80',
     mode: 'hostel',
     targetPerDay: 5,
@@ -246,7 +246,7 @@ const hostelHabits: SeedHabit[] = [
   },
   {
     name: 'Exercise',
-    icon: { ios: 'dumbbell.fill', android: 'fitness_center', web: 'fitness_center' },
+    icon: { ios: 'dumbbell.fill', android: 'fitness-center', web: 'fitness-center' },
     color: '#22D3EE',
     mode: 'hostel',
     targetPerDay: 1,

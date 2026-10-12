@@ -97,11 +97,11 @@ export default function ChallengeDetailScreen() {
                     Status
                   </Caption>
                   <Heading variant="title3">
-                    {challenge.completedAt
+                    {challenge.status === "completed"
                       ? "Completed"
-                      : challenge.startedAt
+                      : challenge.status === "active"
                         ? "Active"
-                        : "New"}
+                        : "Locked"}
                   </Heading>
                 </Card>
               </View>
@@ -112,14 +112,16 @@ export default function ChallengeDetailScreen() {
                 <View
                   style={[
                     styles.barInner,
-                    { width: `${pct}%`, backgroundColor: t.accent },
+                    { width: `${pct}%`, backgroundColor: challenge.status === "completed" ? "#10B981" : t.accent },
                   ]}
                 />
               </View>
             )}
 
             <Caption variant="caption1" color={t.textMuted}>
-              You can log **only once per day**. If you miss a day, the challenge resets.
+              {challenge?.status === "locked"
+                ? `Locked: Complete Challenge #${challenge.id - 1} to unlock this challenge.`
+                : "Progress is tracked automatically based on your daily habit checklist (≥50% completion). If you miss a day, requirement restarts from day 0."}
             </Caption>
           </Card>
         </Animated.View>

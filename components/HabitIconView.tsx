@@ -23,6 +23,7 @@ export function HabitIconView({
     <PlatformSymbol
       ios={icon.ios}
       material={icon.android}
+      library={icon.library}
       tintColor={c}
       size={size}
     />

@@ -2,7 +2,7 @@ import { HabitIconView } from '@/components/HabitIconView';
 import { PlatformSymbol } from '@/components/PlatformSymbol';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -10,6 +10,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   TextInput,
   View,
 } from 'react-native';
@@ -23,29 +24,12 @@ import { useMode } from '@/store/ModeContext';
 import { useAppTheme } from '@/theme';
 import { radius, spacing } from '@/theme/spacing';
 import { typography } from '@/theme/typography';
-
-// ─── Icon catalog ──────────────────────────────────────────────
-
-const ICON_OPTIONS: { icon: HabitIcon; label: string }[] = [
-  { icon: { ios: 'shield.checkmark.fill', android: 'shield', web: 'shield' }, label: 'Shield' },
-  { icon: { ios: 'figure.walk', android: 'directions_walk', web: 'directions_walk' }, label: 'Walk' },
-  { icon: { ios: 'dumbbell.fill', android: 'fitness_center', web: 'fitness_center' }, label: 'Gym' },
-  { icon: { ios: 'moon.stars.fill', android: 'self_improvement', web: 'self_improvement' }, label: 'Pray' },
-  { icon: { ios: 'book.fill', android: 'menu_book', web: 'menu_book' }, label: 'Read' },
-  { icon: { ios: 'bed.double.fill', android: 'hotel', web: 'hotel' }, label: 'Sleep' },
-  { icon: { ios: 'sunrise.fill', android: 'wb_twilight', web: 'wb_twilight' }, label: 'Morning' },
-  { icon: { ios: 'moon.fill', android: 'nightlight', web: 'nightlight' }, label: 'Night' },
-  { icon: { ios: 'brain.head.profile.fill', android: 'psychology', web: 'psychology' }, label: 'Focus' },
-  { icon: { ios: 'clock.badge.checkmark.fill', android: 'schedule', web: 'schedule' }, label: 'Timer' },
-  { icon: { ios: 'drop.fill', android: 'water_drop', web: 'water_drop' }, label: 'Water' },
-  { icon: { ios: 'heart.fill', android: 'favorite', web: 'favorite' }, label: 'Heart' },
-  { icon: { ios: 'leaf.fill', android: 'eco', web: 'eco' }, label: 'Nature' },
-  { icon: { ios: 'xmark.app.fill', android: 'block', web: 'block' }, label: 'Block' },
-  { icon: { ios: 'play.slash.fill', android: 'videocam_off', web: 'videocam_off' }, label: 'No Video' },
-  { icon: { ios: 'iphone.slash', android: 'phonelink_off', web: 'phonelink_off' }, label: 'No Phone' },
-  { icon: { ios: 'pencil.line', android: 'edit', web: 'edit' }, label: 'Journal' },
-  { icon: { ios: 'star.fill', android: 'star', web: 'star' }, label: 'Star' },
-];
+import {
+  HABIT_ICON_OPTIONS,
+  ICON_CATEGORIES,
+  type HabitIconOption,
+  type IconCategory,
+} from '@/constants/habitIcons';
 
 // ─── Color palette ─────────────────────────────────────────────
 
@@ -79,6 +63,7 @@ export default function AddHabitScreen() {
 
   const [name, setName] = useState('');
   const [selectedIcon, setSelectedIcon] = useState(0);
+  const [iconCategory, setIconCategory] = useState<IconCategory>('all');
   const [selectedColor, setSelectedColor] = useState(0);
   const initialMode: Mode =
     params.mode === 'home' || params.mode === 'hostel'
@@ -87,10 +72,17 @@ export default function AddHabitScreen() {
   const [habitMode, setHabitMode] = useState<Mode>(initialMode);
   const [lifeArea, setLifeArea] = useState<LifeArea>('mental');
   const [target, setTarget] = useState(1);
+  const [detoxOnly, setDetoxOnly] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const icon = ICON_OPTIONS[selectedIcon].icon;
+  const selectedOption = HABIT_ICON_OPTIONS[selectedIcon] ?? HABIT_ICON_OPTIONS[0];
+  const icon = selectedOption.icon;
   const color = COLOR_OPTIONS[selectedColor];
+
+  const displayedIcons = useMemo(() => {
+    if (iconCategory === 'all') return HABIT_ICON_OPTIONS;
+    return HABIT_ICON_OPTIONS.filter((opt) => opt.category === iconCategory);
+  }, [iconCategory]);
 
   const handleSave = async () => {
     if (!name.trim() || saving) return;
@@ -104,6 +96,7 @@ export default function AddHabitScreen() {
         mode: habitMode,
         lifeArea,
         targetPerDay: target,
+        detoxOnly,
       });
       router.back();
     } catch (err) {
@@ -135,7 +128,7 @@ export default function AddHabitScreen() {
                 {name.trim() || 'Habit Name'}
               </Body>
               <Caption variant="caption2" color={t.textMuted}>
-                {lifeArea} · {habitMode} · {target}x daily
+                {lifeArea} · {habitMode} · {target}x daily{detoxOnly ? ' · 🛡️ Detox Only' : ''}
               </Caption>
             </View>
             <View style={[styles.previewCheck, { borderColor: color }]} />
@@ -160,18 +153,61 @@ export default function AddHabitScreen() {
 
         {/* ─── Icon Picker ───────────────────────── */}
         <View style={styles.section}>
-          <Caption variant="footnote" color={t.textSecondary} style={styles.sectionLabel}>
-            ICON
-          </Caption>
-          <View style={styles.iconGrid}>
-            {ICON_OPTIONS.map((opt, i) => {
-              const active = i === selectedIcon;
+          <View style={styles.sectionHeaderRow}>
+            <Caption variant="footnote" color={t.textSecondary} style={styles.sectionLabel}>
+              ICON
+            </Caption>
+            <Caption variant="caption1" color={color} style={styles.iconSelectedBadge}>
+              {selectedOption.label}
+            </Caption>
+          </View>
+
+          {/* Category Filter Chips */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.categoryScroll}
+          >
+            {ICON_CATEGORIES.map((cat) => {
+              const active = iconCategory === cat.id;
               return (
                 <Pressable
-                  key={i}
+                  key={cat.id}
                   onPress={() => {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    setSelectedIcon(i);
+                    setIconCategory(cat.id);
+                  }}
+                  style={[
+                    styles.categoryChip,
+                    {
+                      backgroundColor: active ? color : t.card,
+                      borderColor: active ? color : t.border,
+                    },
+                  ]}
+                >
+                  <Caption
+                    variant="caption2"
+                    color={active ? '#FFFFFF' : t.textSecondary}
+                    style={active && { fontWeight: '700' }}
+                  >
+                    {cat.label}
+                  </Caption>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+
+          {/* Icon Grid */}
+          <View style={styles.iconGrid}>
+            {displayedIcons.map((opt) => {
+              const globalIdx = HABIT_ICON_OPTIONS.findIndex((o) => o === opt);
+              const active = globalIdx === selectedIcon;
+              return (
+                <Pressable
+                  key={opt.label}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setSelectedIcon(globalIdx);
                   }}
                   style={[
                     styles.iconCell,
@@ -182,7 +218,7 @@ export default function AddHabitScreen() {
                   <HabitIconView
                     icon={opt.icon}
                     color={active ? color : t.textMuted}
-                    size={20}
+                    size={22}
                   />
                 </Pressable>
               );
@@ -326,6 +362,27 @@ export default function AddHabitScreen() {
             </Pressable>
           </View>
         </View>
+
+        {/* ─── Detox Protocol Task ──────────────── */}
+        <View style={styles.section}>
+          <View style={[styles.switchCard, { backgroundColor: t.card }]}>
+            <View style={{ flex: 1, paddingRight: spacing.md }}>
+              <Heading variant="title3">🛡️ Detox Protocol Task</Heading>
+              <Caption variant="caption2" color={t.textMuted} style={{ marginTop: spacing.xxs }}>
+                When enabled, this habit is an extra task that only activates during Detox Mode days.
+              </Caption>
+            </View>
+            <Switch
+              value={detoxOnly}
+              onValueChange={(val) => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setDetoxOnly(val);
+              }}
+              trackColor={{ false: t.border, true: t.accent }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+        </View>
       </ScrollView>
 
       {/* ─── Actions (pinned) ───────────────────── */}
@@ -389,6 +446,24 @@ const styles = StyleSheet.create({
   sectionLabel: {
     fontWeight: '600',
     letterSpacing: 0.8,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  iconSelectedBadge: {
+    fontWeight: '700',
+  },
+  categoryScroll: {
+    gap: spacing.xs,
+    paddingVertical: spacing.xxs,
+  },
+  categoryChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.full,
+    borderWidth: 1,
   },
   input: {
     borderWidth: 1,
@@ -460,6 +535,15 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     gap: spacing.xxs,
+  },
+
+  // Switch card
+  switchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: spacing.lg,
+    borderRadius: radius.lg,
   },
 
   // Actions

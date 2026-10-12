@@ -39,7 +39,7 @@ import type {
 let db: SQLite.SQLiteDatabase | null = null;
 let dbOpening: Promise<SQLite.SQLiteDatabase> | null = null;
 
-async function getDB(): Promise<SQLite.SQLiteDatabase> {
+async function getRawDB(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
   if (!dbOpening) {
     dbOpening = SQLite.openDatabaseAsync("detox.db").then((d) => {
@@ -62,16 +62,32 @@ let initPromise: Promise<void> | null = null;
 
 export async function initDB(): Promise<void> {
   if (!initPromise) {
-    initPromise = initDBOnce();
+    initPromise = initDBOnce().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
   }
   return initPromise;
 }
 
+async function getDB(): Promise<SQLite.SQLiteDatabase> {
+  await initDB();
+  return getRawDB();
+}
+
 async function initDBOnce(): Promise<void> {
-  const d = await getDB();
+  const d = await getRawDB();
 
   await d.execAsync(`PRAGMA journal_mode = WAL;`);
   await d.execAsync(`PRAGMA foreign_keys = ON;`);
+
+  // Ensure _meta exists before any other tables or queries run
+  await d.execAsync(`
+    CREATE TABLE IF NOT EXISTS _meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
 
   await d.execAsync(`
     CREATE TABLE IF NOT EXISTS habits (
@@ -1020,33 +1036,46 @@ export async function getGlobalStreak(): Promise<number> {
   return streak;
 }
 
-/** Consecutive days (from today backward) where ≥50% of habits for this mode were completed. */
+/** Consecutive days where ≥75% of habits for this mode were completed. */
 export async function getModeStreak(mode: Mode): Promise<number> {
   const d = await getDB();
   const habitRows = await d.getAllAsync<{ id: number }>(
-    `SELECT id FROM habits WHERE mode = ?`,
+    `SELECT id FROM habits WHERE mode = ? AND (deleted IS NULL OR deleted = 0)`,
     [mode],
   );
   if (habitRows.length === 0) return 0;
+  const total = habitRows.length;
 
-  let streak = 0;
-  const cursor = new Date();
-  cursor.setHours(0, 0, 0, 0);
-
-  while (true) {
-    const iso = cursor.toISOString().slice(0, 10);
-    const row = await d.getFirstAsync<{ total: number; done: number }>(
-      `SELECT COUNT(DISTINCT h.id) AS total,
-              COUNT(DISTINCT CASE WHEN e.completed = 1 THEN h.id END) AS done
+  const checkDaySuccess = async (iso: string): Promise<boolean> => {
+    const row = await d.getFirstAsync<{ done: number }>(
+      `SELECT COUNT(DISTINCT CASE WHEN e.completed = 1 THEN h.id END) AS done
        FROM habits h
        LEFT JOIN entries e ON e.habitId = h.id AND e.date = ?
-       WHERE h.mode = ?`,
+       WHERE h.mode = ? AND (h.deleted IS NULL OR h.deleted = 0)`,
       [iso, mode],
     );
-    if (!row || row.total === 0 || row.done / row.total < 0.5) break;
-    streak++;
-    cursor.setDate(cursor.getDate() - 1);
+    return row ? (row.done / total) >= 0.75 : false;
+  };
+
+  const today = new Date().toISOString().slice(0, 10);
+  let streak = 0;
+
+  if (await checkDaySuccess(today)) {
+    streak += 1;
   }
+
+  let cursor = new Date(today + "T12:00:00");
+  cursor.setDate(cursor.getDate() - 1);
+  while (true) {
+    const iso = cursor.toISOString().slice(0, 10);
+    if (await checkDaySuccess(iso)) {
+      streak += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+
   return streak;
 }
 

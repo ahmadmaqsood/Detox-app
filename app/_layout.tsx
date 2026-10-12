@@ -82,6 +82,10 @@ function RootLayoutNavInner() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
+    void initDB().catch((e) => console.warn("App boot DB init", e));
+  }, []);
+
+  useEffect(() => {
     if (!authReady || !user) return;
     let cancelled = false;
     void (async () => {

@@ -57,9 +57,8 @@ export function Card({
   ];
 
   if (animated || pressable) {
-    return (
+    const content = (
       <Animated.View
-        entering={FadeInDown.delay(delay).springify().damping(20).stiffness(120)}
         style={[pressable && pressStyle, cardStyle]}
         onTouchStart={
           pressable
@@ -81,6 +80,18 @@ export function Card({
         {children}
       </Animated.View>
     );
+
+    if (animated) {
+      return (
+        <Animated.View
+          entering={FadeInDown.delay(delay).springify().damping(20).stiffness(120)}
+        >
+          {content}
+        </Animated.View>
+      );
+    }
+
+    return content;
   }
 
   return (
