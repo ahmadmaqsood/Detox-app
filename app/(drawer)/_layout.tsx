@@ -91,9 +91,9 @@ const DRAWER_ITEMS: DrawerItem[] = [
     icon: { ios: "clock.fill", material: "clock-outline" },
   },
   {
-    label: "Focus mode",
+    label: "Deep Work",
     route: "/(drawer)/focusMode",
-    icon: { ios: "lock.shield.fill", material: "shield-lock" },
+    icon: { ios: "brain.head.profile", material: "psychology" },
   },
   {
     label: "App Timers",
@@ -145,7 +145,11 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
       return true;
     if (item.label === "Settings" && pathname === "/settings") return true;
     if (item.label === "Time blocks" && pathname === "/timeBlocks") return true;
-    if (item.label === "Focus mode" && pathname === "/focusMode") return true;
+    if (
+      (item.label === "Deep Work" || item.label === "Focus mode") &&
+      pathname === "/focusMode"
+    )
+      return true;
     if (item.label === "Body" && pathname === "/body") return true;
     if (item.label === "Diet" && pathname === "/diet") return true;
     if (item.label === "App Timers" && pathname === "/appUsage") return true;
@@ -240,56 +244,56 @@ function DrawerItemRow({
         .damping(18)}
     >
       <Animated.View style={animStyle}>
-      <Pressable
-        onPressIn={() => {
-          scale.value = withSpring(0.97, { damping: 15, stiffness: 300 });
-        }}
-        onPressOut={() => {
-          scale.value = withSpring(1, { damping: 12, stiffness: 200 });
-        }}
-        onPress={onPress}
-        style={[styles.item, active && { backgroundColor: t.accent + "12" }]}
-      >
-        <View
-          style={[
-            styles.iconWrap,
-            { backgroundColor: active ? t.accent + "20" : t.card },
-          ]}
+        <Pressable
+          onPressIn={() => {
+            scale.value = withSpring(0.97, { damping: 15, stiffness: 300 });
+          }}
+          onPressOut={() => {
+            scale.value = withSpring(1, { damping: 12, stiffness: 200 });
+          }}
+          onPress={onPress}
+          style={[styles.item, active && { backgroundColor: t.accent + "12" }]}
         >
-          <PlatformSymbol
-            ios={item.icon.ios}
-            material={item.icon.material}
-            tintColor={active ? t.accent : t.textSecondary}
-            size={18}
-          />
-        </View>
-        <Body
-          variant="bodyMedium"
-          color={active ? t.accent : t.textPrimary}
-          style={{ flex: 1 }}
-        >
-          {item.label}
-        </Body>
-        {isDetoxToggle && (
           <View
             style={[
-              styles.detoxBadge,
-              { backgroundColor: detoxOn ? t.accent + "20" : t.card },
+              styles.iconWrap,
+              { backgroundColor: active ? t.accent + "20" : t.card },
             ]}
           >
-            <Caption
-              variant="caption2"
-              color={detoxOn ? t.accent : t.textMuted}
-              style={{ fontWeight: "700" }}
-            >
-              {detoxOn ? "ON" : "OFF"}
-            </Caption>
+            <PlatformSymbol
+              ios={item.icon.ios}
+              material={item.icon.material}
+              tintColor={active ? t.accent : t.textSecondary}
+              size={18}
+            />
           </View>
-        )}
-        {active && !isDetoxToggle && (
-          <View style={[styles.activeDot, { backgroundColor: t.accent }]} />
-        )}
-      </Pressable>
+          <Body
+            variant="bodyMedium"
+            color={active ? t.accent : t.textPrimary}
+            style={{ flex: 1 }}
+          >
+            {item.label}
+          </Body>
+          {isDetoxToggle && (
+            <View
+              style={[
+                styles.detoxBadge,
+                { backgroundColor: detoxOn ? t.accent + "20" : t.card },
+              ]}
+            >
+              <Caption
+                variant="caption2"
+                color={detoxOn ? t.accent : t.textMuted}
+                style={{ fontWeight: "700" }}
+              >
+                {detoxOn ? "ON" : "OFF"}
+              </Caption>
+            </View>
+          )}
+          {active && !isDetoxToggle && (
+            <View style={[styles.activeDot, { backgroundColor: t.accent }]} />
+          )}
+        </Pressable>
       </Animated.View>
     </Animated.View>
   );

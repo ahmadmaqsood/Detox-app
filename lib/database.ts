@@ -28,7 +28,11 @@ import type {
   SpiritualCadence,
   SpiritualChallengeDashboard,
   TimeBlock,
-  UrgeLog
+  UrgeLog,
+  DeepWorkCategory,
+  DeepWorkSession,
+  DeepWorkTask,
+  DeepWorkTaskType,
 } from "./types";
 
 // ─── Singleton ───────────────────────────────────────────────
@@ -744,6 +748,69 @@ async function migrateSchema(d: SQLite.SQLiteDatabase): Promise<void> {
     }
     await d.runAsync(
       `INSERT OR REPLACE INTO _meta (key, value) VALUES ('physical_challenges_ladder_v1', '1')`,
+    );
+  }
+
+  await d.execAsync(`
+    CREATE TABLE IF NOT EXISTS deep_work_tasks (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      title            TEXT NOT NULL,
+      category         TEXT NOT NULL CHECK(category IN ('programming', 'learning', 'reading', 'work', 'other')),
+      type             TEXT NOT NULL DEFAULT 'todo' CHECK(type IN ('todo', 'event')),
+      eventTime        TEXT,
+      date             TEXT NOT NULL DEFAULT (date('now')),
+      completed        INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+      targetMinutes    INTEGER NOT NULL DEFAULT 25,
+      completedMinutes INTEGER NOT NULL DEFAULT 0,
+      createdAt        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  await d.execAsync(`
+    CREATE TABLE IF NOT EXISTS deep_work_sessions (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      taskId            INTEGER,
+      taskTitle         TEXT NOT NULL,
+      category          TEXT NOT NULL CHECK(category IN ('programming', 'learning', 'reading', 'work', 'other')),
+      scheduledMinutes  INTEGER NOT NULL,
+      actualMinutes     INTEGER NOT NULL,
+      status            TEXT NOT NULL CHECK(status IN ('completed', 'abandoned')),
+      abandonReason     TEXT,
+      interruptionCount INTEGER NOT NULL DEFAULT 0,
+      date              TEXT NOT NULL DEFAULT (date('now')),
+      startedAt         TEXT NOT NULL,
+      endedAt           TEXT NOT NULL,
+      FOREIGN KEY (taskId) REFERENCES deep_work_tasks(id) ON DELETE SET NULL
+    );
+  `);
+
+  const deepWorkSeeded = await d.getFirstAsync<{ value: string }>(
+    `SELECT value FROM _meta WHERE key = 'deep_work_seeded_v1'`,
+  );
+  if (!deepWorkSeeded) {
+    const today = todayISO();
+    const defaultTasks: {
+      title: string;
+      category: DeepWorkCategory;
+      type: DeepWorkTaskType;
+      eventTime?: string;
+    }[] = [
+      { title: "English hometask", category: "learning", type: "todo" },
+      { title: "Finish design for the project", category: "work", type: "todo" },
+      { title: "Research", category: "reading", type: "todo" },
+      { title: "Publish post", category: "work", type: "todo" },
+      { title: "Daily meeting", category: "work", type: "event", eventTime: "11:00 am" },
+      { title: "Lunch", category: "other", type: "event", eventTime: "02:00 pm" },
+      { title: "Training", category: "other", type: "event", eventTime: "07:00 pm" },
+    ];
+    for (const item of defaultTasks) {
+      await d.runAsync(
+        `INSERT INTO deep_work_tasks (title, category, type, eventTime, date) VALUES (?, ?, ?, ?, ?)`,
+        [item.title, item.category, item.type, item.eventTime ?? null, today],
+      );
+    }
+    await d.runAsync(
+      `INSERT OR REPLACE INTO _meta (key, value) VALUES ('deep_work_seeded_v1', '1')`,
     );
   }
 }
@@ -2661,3 +2728,143 @@ export async function unlockAchievement(id: string): Promise<void> {
     [id, iso],
   );
 }
+
+// ─── Deep Work & Focus ───────────────────────────────────────
+
+export async function getDeepWorkTasks(
+  date: string = todayISO(),
+): Promise<DeepWorkTask[]> {
+  const d = await getDB();
+  return d.getAllAsync<DeepWorkTask>(
+    `SELECT * FROM deep_work_tasks WHERE date = ? ORDER BY type DESC, id ASC`,
+    [date],
+  );
+}
+
+export async function addDeepWorkTask(
+  task: Omit<DeepWorkTask, "id" | "createdAt" | "completedMinutes" | "completed"> & {
+    completedMinutes?: number;
+    completed?: number;
+  },
+): Promise<number> {
+  const d = await getDB();
+  const res = await d.runAsync(
+    `INSERT INTO deep_work_tasks (title, category, type, eventTime, date, completed, targetMinutes, completedMinutes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      task.title,
+      task.category,
+      task.type,
+      task.eventTime ?? null,
+      task.date,
+      task.completed ?? 0,
+      task.targetMinutes,
+      task.completedMinutes ?? 0,
+    ],
+  );
+  return res.lastInsertRowId;
+}
+
+export async function toggleDeepWorkTask(
+  id: number,
+  completed: boolean,
+): Promise<void> {
+  const d = await getDB();
+  await d.runAsync(`UPDATE deep_work_tasks SET completed = ? WHERE id = ?`, [
+    completed ? 1 : 0,
+    id,
+  ]);
+}
+
+export async function deleteDeepWorkTask(id: number): Promise<void> {
+  const d = await getDB();
+  await d.runAsync(`DELETE FROM deep_work_tasks WHERE id = ?`, [id]);
+}
+
+export async function updateDeepWorkTaskMinutes(
+  id: number,
+  addedMinutes: number,
+): Promise<void> {
+  const d = await getDB();
+  await d.runAsync(
+    `UPDATE deep_work_tasks SET completedMinutes = completedMinutes + ? WHERE id = ?`,
+    [addedMinutes, id],
+  );
+}
+
+export async function saveDeepWorkSession(
+  session: Omit<DeepWorkSession, "id">,
+): Promise<number> {
+  const d = await getDB();
+  const res = await d.runAsync(
+    `INSERT INTO deep_work_sessions (taskId, taskTitle, category, scheduledMinutes, actualMinutes, status, abandonReason, interruptionCount, date, startedAt, endedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      session.taskId ?? null,
+      session.taskTitle,
+      session.category,
+      session.scheduledMinutes,
+      session.actualMinutes,
+      session.status,
+      session.abandonReason ?? null,
+      session.interruptionCount,
+      session.date,
+      session.startedAt,
+      session.endedAt,
+    ],
+  );
+
+  if (session.taskId && session.actualMinutes > 0) {
+    const numId = typeof session.taskId === "number" ? session.taskId : parseInt(String(session.taskId), 10);
+    if (!isNaN(numId)) {
+      await updateDeepWorkTaskMinutes(numId, session.actualMinutes);
+    }
+  }
+
+  return res.lastInsertRowId;
+}
+
+export async function getDeepWorkSessions(
+  date: string = todayISO(),
+): Promise<DeepWorkSession[]> {
+  const d = await getDB();
+  return d.getAllAsync<DeepWorkSession>(
+    `SELECT * FROM deep_work_sessions WHERE date = ? ORDER BY id DESC`,
+    [date],
+  );
+}
+
+export async function getDeepWorkWeeklySummary(
+  endDate: string = todayISO(),
+): Promise<{ date: string; minutes: number }[]> {
+  const d = await getDB();
+  const out: { date: string; minutes: number }[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const curDate = addCalendarDays(endDate, -i);
+    const row = await d.getFirstAsync<{ total: number }>(
+      `SELECT COALESCE(SUM(actualMinutes), 0) AS total FROM deep_work_sessions WHERE date = ?`,
+      [curDate],
+    );
+    out.push({ date: curDate, minutes: row?.total ?? 0 });
+  }
+  return out;
+}
+
+export async function getDeepWorkDailyTargetMinutes(): Promise<number> {
+  const d = await getDB();
+  const row = await d.getFirstAsync<{ value: string }>(
+    `SELECT value FROM _meta WHERE key = 'deep_work_daily_target_minutes'`,
+  );
+  return row ? parseInt(row.value, 10) || 120 : 120;
+}
+
+export async function setDeepWorkDailyTargetMinutes(
+  min: number,
+): Promise<void> {
+  const d = await getDB();
+  await d.runAsync(
+    `INSERT OR REPLACE INTO _meta (key, value) VALUES ('deep_work_daily_target_minutes', ?)`,
+    [String(min)],
+  );
+}
+

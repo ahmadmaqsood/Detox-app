@@ -12,7 +12,6 @@ import {
   getChallenges,
   getDailyEntry,
   getDailyIntervention,
-  getEssentialHabitsToday,
   getModeStreak,
   getMotivationalMessage,
   getTodayHabits,
@@ -33,7 +32,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import * as Haptics from "expo-haptics";
 import { useFocusEffect, useNavigation, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from "react-native";
 import Animated, {
   Easing,

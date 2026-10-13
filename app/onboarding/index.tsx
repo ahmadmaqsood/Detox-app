@@ -379,18 +379,31 @@ export default function OnboardingScreen() {
 
   const viewabilityConfig = useRef({ viewAreaCoveragePercentThreshold: 50 }).current;
 
-  const goNext = async () => {
+  const finishOnboarding = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      const { setLocalOnboardingComplete } = await import("@/lib/onboardingLocal");
+      await setLocalOnboardingComplete();
+    } catch {
+      // ignore
+    }
+    router.replace(user ? "/(drawer)/(tabs)/today" : "/(auth)/login");
+  };
 
+  const goNext = async () => {
     if (isLast) {
-      // Onboarding is intentionally shown on every app open (no one-time completion).
-      router.replace(user ? "/(drawer)/(tabs)/today" : "/(auth)/login");
+      await finishOnboarding();
     } else {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       flatListRef.current?.scrollToIndex({
         index: activeIndex + 1,
         animated: true,
       });
     }
+  };
+
+  const handleSkip = async () => {
+    await finishOnboarding();
   };
 
   useEffect(() => {
@@ -475,7 +488,7 @@ export default function OnboardingScreen() {
           </Pressable>
         </Animated.View>
 
-        <Pressable onPress={goNext} style={styles.skipRow}>
+        <Pressable onPress={handleSkip} style={styles.skipRow} hitSlop={12}>
           {!isLast && (
             <Animated.Text
               entering={FadeIn}

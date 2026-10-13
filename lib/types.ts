@@ -89,6 +89,9 @@ export interface DailyInterventionDoc {
   updatedAt?: any;
 }
 
+export type EnergyLevel = 'low' | 'medium' | 'high';
+export type MoodState = 'great' | 'balanced' | 'stressed' | 'low';
+
 export interface Metrics {
   date: string;
   screenTime: number;
@@ -104,6 +107,24 @@ export interface Metrics {
   heightCm?: number;
   /** Weight in kilograms. */
   weightKg?: number;
+  /** Bedtime string, e.g. "23:00". */
+  bedTime?: string;
+  /** Wake time string, e.g. "06:30". */
+  wakeTime?: string;
+  /** Daily energy rating. */
+  energyRating?: EnergyLevel;
+  /** Daily mood rating. */
+  moodRating?: MoodState;
+  /** Minutes spent outdoors / in sunlight. */
+  outdoorMinutes?: number;
+  /** Minutes spent stretching. */
+  stretchingMinutes?: number;
+  /** Minutes of intentional workout / gym. */
+  workoutMinutes?: number;
+  /** Minutes of walking logged. */
+  walkMinutes?: number;
+  /** Minutes of deep work focus logged. */
+  deepWorkMinutes?: number;
 }
 
 export interface ModeRow {
@@ -273,6 +294,21 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface CoachExchange {
+  id: string;
+  userMessage: string;
+  userTimestamp: number;
+  assistantReply: string;
+  assistantTimestamp: number;
+}
+
+export interface DailyCoachChatDoc {
+  date: string; // YYYY-MM-DD
+  createdAt: number;
+  updatedAt?: any;
+  exchanges: CoachExchange[];
+}
+
 export interface RelapseEvent {
   id: number;
   occurredAt: string;
@@ -294,4 +330,42 @@ export interface TimeBlock {
 export interface AchievementUnlockRow {
   achievementId: string;
   unlockedAt: string;
+}
+
+export type DeepWorkCategory = 'programming' | 'learning' | 'reading' | 'work' | 'other';
+export type DeepWorkTaskType = 'todo' | 'event';
+export type DeepWorkSessionStatus = 'completed' | 'abandoned';
+export type DeepWorkAbandonReason =
+  | 'distraction_urge'
+  | 'phone_notification'
+  | 'mental_fatigue'
+  | 'external_interruption'
+  | 'other';
+
+export interface DeepWorkTask {
+  id: string | number;
+  title: string;
+  category: DeepWorkCategory;
+  type: DeepWorkTaskType;
+  eventTime?: string | null;
+  date: string;
+  completed: number; // 0 | 1
+  targetMinutes: number;
+  completedMinutes: number;
+  createdAt: string;
+}
+
+export interface DeepWorkSession {
+  id: string | number;
+  taskId?: string | number | null;
+  taskTitle: string;
+  category: DeepWorkCategory;
+  scheduledMinutes: number;
+  actualMinutes: number;
+  status: DeepWorkSessionStatus;
+  abandonReason?: string | null;
+  interruptionCount: number;
+  date: string;
+  startedAt: string;
+  endedAt: string;
 }

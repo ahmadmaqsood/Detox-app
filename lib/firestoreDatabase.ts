@@ -1,32 +1,38 @@
-import { Platform } from "react-native";
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from "@/lib/firebase";
 import { defaultHabits } from "@/lib/seed";
 import { MASTER_ACHIEVEMENTS, MASTER_CHALLENGES } from "@/lib/seed/masterCatalog";
 import type {
   AchievementDefinition,
-  AchievementsStateDoc,
   Challenge,
   ChallengeCategory,
   ChallengeCompletionRecord,
   ChallengesStateDoc,
   ChallengeStats,
   ChallengeStatus,
-  ChatMessage,
+  CoachExchange,
   CompletedChallengeItem,
+  DailyCoachChatDoc,
   DailyHabitEntry,
   DailyInterventionDoc,
   DailyProgressEntry,
+  DeepWorkCategory,
+  DeepWorkSession,
+  DeepWorkTask,
+  DeepWorkTaskType,
+  EnergyLevel,
   Habit,
   HabitIcon,
   LifeArea,
   Metrics,
   Mode,
+  MoodState,
   RecoveryActionEntry,
   RelapseEvent,
-  UnlockedAchievementItem,
+  UnlockedAchievementItem
 } from "@/lib/types";
 import {
   collection,
+  deleteDoc,
   doc,
   documentId,
   getDoc,
@@ -43,6 +49,7 @@ import {
   where,
   writeBatch
 } from "firebase/firestore";
+import { Platform } from "react-native";
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -90,7 +97,6 @@ function userRoot(uid: string) {
     meta: collection(db, "users", uid, "meta"),
     habits: collection(db, "users", uid, "habits"),
     entries: collection(db, "users", uid, "entries"),
-    coachChat: collection(db, "users", uid, "coachChat"),
     interventions: collection(db, "users", uid, "interventions"),
     appOpens: collection(db, "users", uid, "app_open_events"),
     challenges: collection(db, "users", uid, "challenges"),
@@ -98,6 +104,9 @@ function userRoot(uid: string) {
     challengeLogs: collection(db, "users", uid, "challenge_logs"),
     insightSnapshots: collection(db, "users", uid, "insight_snapshots"),
     achievements: collection(db, "users", uid, "achievements"),
+    deepWorkTasks: collection(db, "users", uid, "deep_work_tasks"),
+    deepWorkSessions: collection(db, "users", uid, "deep_work_sessions"),
+    coachDailyChats: collection(db, "users", uid, "coach_daily_chats"),
   };
 }
 
@@ -972,8 +981,8 @@ async function updateUserProgressAfterToggle(completedNow: boolean): Promise<voi
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const stateRef = doc(db, "users", uid, "meta", "state");
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(stateRef);
+  try {
+    const snap = await getDoc(stateRef);
     const cur = (snap.data() as any)?.user_level?.xp ?? 0;
     const xp = Math.max(0, cur + (completedNow ? 8 : 0));
     const rank =
@@ -984,8 +993,10 @@ async function updateUserProgressAfterToggle(completedNow: boolean): Promise<voi
           : xp >= 250
             ? "intermediate"
             : "beginner";
-    tx.set(stateRef, { user_level: { xp, rank, updatedAt: serverTimestamp() } }, { merge: true });
-  });
+    await setDoc(stateRef, { user_level: { xp, rank, updatedAt: serverTimestamp() } }, { merge: true });
+  } catch (e) {
+    console.warn("Failed to update user progression:", e);
+  }
 
   const streak = await getGlobalStreak();
   const milestones = [
@@ -1470,20 +1481,94 @@ export async function getInsightSignals(): Promise<InsightSignals> {
   };
 }
 
-// Coach chat (AI + user)
-export async function addCoachChatMessage(msg: ChatMessage): Promise<void> {
+// ─── Daily AI Coach Chat (`users/{uid}/coach_daily_chats/{date}`) ─────────────
+
+export async function getDailyCoachChat(date: string = todayISO()): Promise<DailyCoachChatDoc | null> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  await setDoc(doc(db, "users", uid, "coachChat", msg.id), msg, { merge: true });
+  const snap = await getDoc(doc(db, "users", uid, "coach_daily_chats", date));
+  if (!snap.exists()) return null;
+  const d = snap.data() as Record<string, unknown>;
+  return {
+    date: String(d.date ?? date),
+    createdAt: Number(d.createdAt ?? Date.now()),
+    exchanges: Array.isArray(d.exchanges) ? (d.exchanges as CoachExchange[]) : [],
+  };
 }
 
-export async function getCoachChatMessages(limitN = 100): Promise<ChatMessage[]> {
+export async function saveCoachExchange(
+  exchange: CoachExchange,
+  date: string = todayISO(),
+): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const qy = query(collection(db, "users", uid, "coachChat"), orderBy("timestamp", "asc"), limit(limitN));
-  const snap = await getDocs(qy);
-  return snap.docs.map((d) => d.data() as ChatMessage);
+  const docRef = doc(db, "users", uid, "coach_daily_chats", date);
+  const snap = await getDoc(docRef);
+
+  if (!snap.exists()) {
+    await setDoc(docRef, {
+      date,
+      createdAt: Date.now(),
+      updatedAt: serverTimestamp(),
+      exchanges: [exchange],
+    });
+  } else {
+    const existing = (snap.data()?.exchanges ?? []) as CoachExchange[];
+    const idx = existing.findIndex((e) => e.id === exchange.id);
+    let updatedExchanges: CoachExchange[];
+    if (idx >= 0) {
+      updatedExchanges = [...existing];
+      updatedExchanges[idx] = exchange;
+    } else {
+      updatedExchanges = [...existing, exchange];
+    }
+    await setDoc(
+      docRef,
+      {
+        date,
+        updatedAt: serverTimestamp(),
+        exchanges: updatedExchanges,
+      },
+      { merge: true },
+    );
+  }
 }
+
+export async function getAllCoachDailyChats(): Promise<DailyCoachChatDoc[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const snap = await getDocs(
+    query(collection(db, "users", uid, "coach_daily_chats"), limit(400)),
+  );
+  const list: DailyCoachChatDoc[] = [];
+  for (const d of snap.docs) {
+    const data = d.data() as Record<string, unknown>;
+    list.push({
+      date: String(data.date ?? d.id),
+      createdAt: Number(data.createdAt ?? 0),
+      exchanges: Array.isArray(data.exchanges) ? (data.exchanges as CoachExchange[]) : [],
+    });
+  }
+  return list.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export async function getCoachChatsOlderThan(daysOld: number = 30): Promise<DailyCoachChatDoc[]> {
+  const cutoffDate = addCalendarDays(todayISO(), -daysOld);
+  const all = await getAllCoachDailyChats();
+  return all.filter((doc) => doc.date < cutoffDate);
+}
+
+export async function deleteCoachChatDays(dates: string[]): Promise<void> {
+  if (!dates || dates.length === 0) return;
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const batch = writeBatch(db);
+  for (const d of dates) {
+    batch.delete(doc(db, "users", uid, "coach_daily_chats", d));
+  }
+  await batch.commit();
+}
+
 
 // ─── Interventions (single daily document per date) ─────────────
 
@@ -1870,7 +1955,7 @@ export async function syncAutoChallengeProgress(
               },
               trigger: null,
             });
-          } catch {}
+          } catch { }
         }
       }
     }
@@ -2066,9 +2151,70 @@ export async function saveMetrics(
     data.relapse !== undefined ? (data.relapse ? 1 : 0) : Number(existing?.relapse ? 1 : 0);
   const sleepMinutes = data.sleepMinutes ?? Number(existing?.sleepMinutes ?? 0);
   const steps = data.steps ?? Number(existing?.steps ?? 0);
-  const waterGlasses = data.waterGlasses !== undefined ? Number(data.waterGlasses) : existing?.waterGlasses !== undefined ? Number(existing.waterGlasses) : undefined;
-  const heightCm = data.heightCm !== undefined ? Number(data.heightCm) : existing?.heightCm !== undefined ? Number(existing.heightCm) : undefined;
-  const weightKg = data.weightKg !== undefined ? Number(data.weightKg) : existing?.weightKg !== undefined ? Number(existing.weightKg) : undefined;
+  const waterGlasses =
+    data.waterGlasses !== undefined
+      ? Number(data.waterGlasses)
+      : existing?.waterGlasses !== undefined
+        ? Number(existing.waterGlasses)
+        : undefined;
+  const heightCm =
+    data.heightCm !== undefined
+      ? Number(data.heightCm)
+      : existing?.heightCm !== undefined
+        ? Number(existing.heightCm)
+        : undefined;
+  const weightKg =
+    data.weightKg !== undefined
+      ? Number(data.weightKg)
+      : existing?.weightKg !== undefined
+        ? Number(existing.weightKg)
+        : undefined;
+  const bedTime =
+    data.bedTime !== undefined
+      ? data.bedTime
+      : (existing?.bedTime as string | undefined);
+  const wakeTime =
+    data.wakeTime !== undefined
+      ? data.wakeTime
+      : (existing?.wakeTime as string | undefined);
+  const energyRating =
+    data.energyRating !== undefined
+      ? data.energyRating
+      : (existing?.energyRating as EnergyLevel | undefined);
+  const moodRating =
+    data.moodRating !== undefined
+      ? data.moodRating
+      : (existing?.moodRating as MoodState | undefined);
+  const outdoorMinutes =
+    data.outdoorMinutes !== undefined
+      ? Number(data.outdoorMinutes)
+      : existing?.outdoorMinutes !== undefined
+        ? Number(existing.outdoorMinutes)
+        : undefined;
+  const stretchingMinutes =
+    data.stretchingMinutes !== undefined
+      ? Number(data.stretchingMinutes)
+      : existing?.stretchingMinutes !== undefined
+        ? Number(existing.stretchingMinutes)
+        : undefined;
+  const workoutMinutes =
+    data.workoutMinutes !== undefined
+      ? Number(data.workoutMinutes)
+      : existing?.workoutMinutes !== undefined
+        ? Number(existing.workoutMinutes)
+        : undefined;
+  const walkMinutes =
+    data.walkMinutes !== undefined
+      ? Number(data.walkMinutes)
+      : existing?.walkMinutes !== undefined
+        ? Number(existing.walkMinutes)
+        : undefined;
+  const deepWorkMinutes =
+    data.deepWorkMinutes !== undefined
+      ? Number(data.deepWorkMinutes)
+      : existing?.deepWorkMinutes !== undefined
+        ? Number(existing.deepWorkMinutes)
+        : undefined;
 
   const payload: any = {
     date: day,
@@ -2082,6 +2228,15 @@ export async function saveMetrics(
   if (waterGlasses !== undefined) payload.waterGlasses = waterGlasses;
   if (heightCm !== undefined) payload.heightCm = heightCm;
   if (weightKg !== undefined) payload.weightKg = weightKg;
+  if (bedTime !== undefined) payload.bedTime = bedTime;
+  if (wakeTime !== undefined) payload.wakeTime = wakeTime;
+  if (energyRating !== undefined) payload.energyRating = energyRating;
+  if (moodRating !== undefined) payload.moodRating = moodRating;
+  if (outdoorMinutes !== undefined) payload.outdoorMinutes = outdoorMinutes;
+  if (stretchingMinutes !== undefined) payload.stretchingMinutes = stretchingMinutes;
+  if (workoutMinutes !== undefined) payload.workoutMinutes = workoutMinutes;
+  if (walkMinutes !== undefined) payload.walkMinutes = walkMinutes;
+  if (deepWorkMinutes !== undefined) payload.deepWorkMinutes = deepWorkMinutes;
 
   await setDoc(ref, payload, { merge: true });
 }
@@ -2100,6 +2255,18 @@ export async function getMetrics(date?: string): Promise<Metrics | null> {
     relapse: Number(m.relapse ? 1 : 0),
     sleepMinutes: Number(m.sleepMinutes ?? 0),
     steps: Number(m.steps ?? 0),
+    waterGlasses: m.waterGlasses !== undefined ? Number(m.waterGlasses) : undefined,
+    heightCm: m.heightCm !== undefined ? Number(m.heightCm) : undefined,
+    weightKg: m.weightKg !== undefined ? Number(m.weightKg) : undefined,
+    bedTime: m.bedTime as string | undefined,
+    wakeTime: m.wakeTime as string | undefined,
+    energyRating: m.energyRating as EnergyLevel | undefined,
+    moodRating: m.moodRating as MoodState | undefined,
+    outdoorMinutes: m.outdoorMinutes !== undefined ? Number(m.outdoorMinutes) : undefined,
+    stretchingMinutes: m.stretchingMinutes !== undefined ? Number(m.stretchingMinutes) : undefined,
+    workoutMinutes: m.workoutMinutes !== undefined ? Number(m.workoutMinutes) : undefined,
+    walkMinutes: m.walkMinutes !== undefined ? Number(m.walkMinutes) : undefined,
+    deepWorkMinutes: m.deepWorkMinutes !== undefined ? Number(m.deepWorkMinutes) : undefined,
   };
 }
 
@@ -2119,6 +2286,18 @@ export async function getMetricsRange(from: string, to: string): Promise<Metrics
       relapse: Number(m.relapse ? 1 : 0),
       sleepMinutes: Number(m.sleepMinutes ?? 0),
       steps: Number(m.steps ?? 0),
+      waterGlasses: m.waterGlasses !== undefined ? Number(m.waterGlasses) : undefined,
+      heightCm: m.heightCm !== undefined ? Number(m.heightCm) : undefined,
+      weightKg: m.weightKg !== undefined ? Number(m.weightKg) : undefined,
+      bedTime: m.bedTime as string | undefined,
+      wakeTime: m.wakeTime as string | undefined,
+      energyRating: m.energyRating as EnergyLevel | undefined,
+      moodRating: m.moodRating as MoodState | undefined,
+      outdoorMinutes: m.outdoorMinutes !== undefined ? Number(m.outdoorMinutes) : undefined,
+      stretchingMinutes: m.stretchingMinutes !== undefined ? Number(m.stretchingMinutes) : undefined,
+      workoutMinutes: m.workoutMinutes !== undefined ? Number(m.workoutMinutes) : undefined,
+      walkMinutes: m.walkMinutes !== undefined ? Number(m.walkMinutes) : undefined,
+      deepWorkMinutes: m.deepWorkMinutes !== undefined ? Number(m.deepWorkMinutes) : undefined,
     });
   }
   return rows.sort((a, b) => a.date.localeCompare(b.date));
@@ -2314,10 +2493,14 @@ export async function getLifeAreaBalance(days = 7): Promise<LifeAreaBalanceRow[]
   for (const a of areas) agg.set(a, { total: 0, done: 0 });
   for (const h of habits) {
     const b = byHabit.get(h.id) ?? { total: 0, done: 0 };
-    const cur = agg.get(h.lifeArea)!;
+    const area: LifeArea =
+      h.lifeArea && agg.has(h.lifeArea as LifeArea)
+        ? (h.lifeArea as LifeArea)
+        : "mental";
+    const cur = agg.get(area) ?? { total: 0, done: 0 };
     cur.total += b.total;
     cur.done += b.done;
-    agg.set(h.lifeArea, cur);
+    agg.set(area, cur);
   }
   return areas.map((lifeArea) => {
     const r = agg.get(lifeArea)!;
@@ -2485,4 +2668,340 @@ async function persistInsightsMeta(uid: string): Promise<void> {
     { merge: true },
   );
 }
+
+// ─── Deep Work & Focus — Firestore `deep_work_tasks` & `deep_work_sessions` ─────
+
+const DEFAULT_DEEP_WORK_TASKS: Array<{
+  title: string;
+  category: DeepWorkCategory;
+  type: DeepWorkTaskType;
+  eventTime?: string;
+  targetMinutes: number;
+}> = [
+    { title: "Design Sprint: Wireframing UX", category: "work", type: "event", eventTime: "10:30 am", targetMinutes: 50 },
+    { title: "Fix Auth State Crash in Deep Work", category: "programming", type: "todo", targetMinutes: 25 },
+    { title: "Review React Native Reanimated v3", category: "learning", type: "todo", targetMinutes: 25 },
+    { title: "Deep Work Book - Chapter 4 Notes", category: "reading", type: "todo", targetMinutes: 25 },
+  ];
+
+export async function getDeepWorkTasks(date: string = todayISO()): Promise<DeepWorkTask[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const tasksRef = collection(db, "users", uid, "deep_work_tasks");
+
+  try {
+    const q = query(tasksRef, where("date", "==", date));
+    const snap = await getDocs(q);
+
+    // If no tasks exist for today, check if this user ever seeded tasks
+    if (snap.empty && date === todayISO()) {
+      const anyTasksSnap = await getDocs(query(tasksRef, limit(1)));
+      if (anyTasksSnap.empty) {
+        // Seed initial default tasks for today
+        const createdList: DeepWorkTask[] = [];
+        const batch = writeBatch(db);
+        for (const t of DEFAULT_DEEP_WORK_TASKS) {
+          const docRef = doc(tasksRef);
+          const item: DeepWorkTask = {
+            id: docRef.id,
+            title: t.title,
+            category: t.category,
+            type: t.type,
+            eventTime: t.eventTime ?? null,
+            date: date,
+            completed: 0,
+            targetMinutes: t.targetMinutes,
+            completedMinutes: 0,
+            createdAt: new Date().toISOString(),
+          };
+          batch.set(docRef, {
+            ...item,
+            updatedAt: serverTimestamp(),
+          });
+          createdList.push(item);
+        }
+        await batch.commit();
+        return createdList;
+      }
+    }
+
+    const tasks: DeepWorkTask[] = snap.docs.map((d) => {
+      const data = d.data() as Record<string, unknown>;
+      return {
+        id: d.id,
+        title: String(data.title ?? ""),
+        category: (data.category as DeepWorkCategory) ?? "other",
+        type: (data.type as DeepWorkTaskType) ?? "todo",
+        eventTime: data.eventTime ? String(data.eventTime) : null,
+        date: String(data.date ?? date),
+        completed: Number(data.completed ?? 0),
+        targetMinutes: Number(data.targetMinutes ?? 25),
+        completedMinutes: Number(data.completedMinutes ?? 0),
+        createdAt: String(data.createdAt ?? ""),
+      };
+    });
+
+    // Sort: events first, then by createdAt
+    return tasks.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "event" ? -1 : 1;
+      return (a.createdAt || "").localeCompare(b.createdAt || "");
+    });
+  } catch (e) {
+    console.warn("getDeepWorkTasks failed in Firestore:", e);
+    return [];
+  }
+}
+
+export async function addDeepWorkTask(
+  task: Omit<DeepWorkTask, "id" | "createdAt" | "completedMinutes" | "completed"> & {
+    id?: string | number;
+    completedMinutes?: number;
+    completed?: number;
+  },
+): Promise<string> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const tasksRef = collection(db, "users", uid, "deep_work_tasks");
+  const docRef = doc(tasksRef);
+  const now = new Date().toISOString();
+
+  await setDoc(docRef, {
+    title: task.title,
+    category: task.category,
+    type: task.type,
+    eventTime: task.eventTime ?? null,
+    date: task.date,
+    completed: task.completed ?? 0,
+    targetMinutes: task.targetMinutes,
+    completedMinutes: task.completedMinutes ?? 0,
+    createdAt: now,
+    updatedAt: serverTimestamp(),
+  });
+
+  return docRef.id;
+}
+
+export async function toggleDeepWorkTask(
+  id: string | number,
+  completed: boolean,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "deep_work_tasks", String(id));
+  await updateDoc(ref, {
+    completed: completed ? 1 : 0,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteDeepWorkTask(id: string | number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "deep_work_tasks", String(id));
+  await deleteDoc(ref);
+}
+
+export async function updateDeepWorkTaskMinutes(
+  id: string | number,
+  addedMinutes: number,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "deep_work_tasks", String(id));
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    const data = snap.data();
+    const current = Number(data.completedMinutes ?? 0);
+    await updateDoc(ref, {
+      completedMinutes: current + addedMinutes,
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
+export async function saveDeepWorkSession(
+  session: Omit<DeepWorkSession, "id">,
+): Promise<string> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const sessionsRef = collection(db, "users", uid, "deep_work_sessions");
+  const docRef = doc(sessionsRef);
+
+  await setDoc(docRef, {
+    taskId: session.taskId != null ? String(session.taskId) : null,
+    taskTitle: session.taskTitle,
+    category: session.category,
+    scheduledMinutes: session.scheduledMinutes,
+    actualMinutes: session.actualMinutes,
+    status: session.status,
+    abandonReason: session.abandonReason ?? null,
+    interruptionCount: session.interruptionCount,
+    date: session.date,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    createdAt: serverTimestamp(),
+  });
+
+  if (session.taskId && session.actualMinutes > 0) {
+    try {
+      await updateDeepWorkTaskMinutes(session.taskId, session.actualMinutes);
+    } catch (e) {
+      console.warn("Failed updating task minutes in Firestore:", e);
+    }
+  }
+
+  // Update daily metrics with focus minutes
+  try {
+    const currentMetrics = await getMetrics(session.date);
+    const existingMins = Number(currentMetrics?.deepWorkMinutes ?? 0);
+    await saveMetrics({
+      date: session.date,
+      deepWorkMinutes: existingMins + session.actualMinutes,
+    });
+  } catch (e) {
+    console.warn("Failed updating daily metrics with deep work minutes:", e);
+  }
+
+  return docRef.id;
+}
+
+export async function getDeepWorkSessions(
+  date?: string,
+): Promise<DeepWorkSession[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const sessionsRef = collection(db, "users", uid, "deep_work_sessions");
+
+  try {
+    const q = date
+      ? query(sessionsRef, where("date", "==", date), limit(200))
+      : query(sessionsRef, limit(200));
+
+    const snap = await getDocs(q);
+    const list: DeepWorkSession[] = snap.docs.map((d) => {
+      const data = d.data() as Record<string, unknown>;
+      return {
+        id: d.id,
+        taskId: data.taskId != null ? String(data.taskId) : null,
+        taskTitle: String(data.taskTitle ?? "Focus Session"),
+        category: (data.category as DeepWorkCategory) ?? "other",
+        scheduledMinutes: Number(data.scheduledMinutes ?? 25),
+        actualMinutes: Number(data.actualMinutes ?? 0),
+        status: (data.status as DeepWorkSession["status"]) ?? "completed",
+        abandonReason: data.abandonReason ? String(data.abandonReason) : null,
+        interruptionCount: Number(data.interruptionCount ?? 0),
+        date: String(data.date ?? todayISO()),
+        startedAt: String(data.startedAt ?? ""),
+        endedAt: String(data.endedAt ?? ""),
+      };
+    });
+
+    // Sort by startedAt or endedAt descending
+    return list.sort((a, b) => (b.startedAt || b.endedAt || "").localeCompare(a.startedAt || a.endedAt || ""));
+  } catch (e) {
+    console.warn("getDeepWorkSessions failed in Firestore:", e);
+    return [];
+  }
+}
+
+export async function getLastDeepWorkSession(): Promise<DeepWorkSession | null> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const sessionsRef = collection(db, "users", uid, "deep_work_sessions");
+
+  try {
+    const q = query(sessionsRef, limit(50));
+    const snap = await getDocs(q);
+    if (snap.empty) return null;
+
+    const list: DeepWorkSession[] = snap.docs.map((d) => {
+      const data = d.data() as Record<string, unknown>;
+      return {
+        id: d.id,
+        taskId: data.taskId != null ? String(data.taskId) : null,
+        taskTitle: String(data.taskTitle ?? "Focus Session"),
+        category: (data.category as DeepWorkCategory) ?? "other",
+        scheduledMinutes: Number(data.scheduledMinutes ?? 25),
+        actualMinutes: Number(data.actualMinutes ?? 0),
+        status: (data.status as DeepWorkSession["status"]) ?? "completed",
+        abandonReason: data.abandonReason ? String(data.abandonReason) : null,
+        interruptionCount: Number(data.interruptionCount ?? 0),
+        date: String(data.date ?? todayISO()),
+        startedAt: String(data.startedAt ?? ""),
+        endedAt: String(data.endedAt ?? ""),
+      };
+    });
+
+    list.sort((a, b) => (b.endedAt || b.startedAt || "").localeCompare(a.endedAt || a.startedAt || ""));
+    return list[0] ?? null;
+  } catch (e) {
+    console.warn("getLastDeepWorkSession failed in Firestore:", e);
+    return null;
+  }
+}
+
+export async function getDeepWorkWeeklySummary(
+  endDate: string = todayISO(),
+): Promise<{ date: string; minutes: number }[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const sessionsRef = collection(db, "users", uid, "deep_work_sessions");
+
+  const dates: string[] = [];
+  for (let i = 6; i >= 0; i--) {
+    dates.push(addCalendarDays(endDate, -i));
+  }
+
+  const out: Record<string, number> = {};
+  for (const d of dates) {
+    out[d] = 0;
+  }
+
+  try {
+    const q = query(sessionsRef, limit(300));
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      const data = d.data() as Record<string, unknown>;
+      const sDate = String(data.date ?? "");
+      if (out[sDate] !== undefined) {
+        out[sDate] += Number(data.actualMinutes ?? 0);
+      }
+    }
+  } catch (e) {
+    console.warn("getDeepWorkWeeklySummary failed in Firestore:", e);
+  }
+
+  return dates.map((d) => ({ date: d, minutes: out[d] ?? 0 }));
+}
+
+export async function getDeepWorkDailyTargetMinutes(): Promise<number> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const stateRef = doc(db, "users", uid, "meta", "state");
+    const snap = await getDoc(stateRef);
+    if (!snap.exists()) return 120;
+    const data = snap.data() as Record<string, unknown>;
+    const val = Number(data.deep_work_daily_target_minutes);
+    return !isNaN(val) && val > 0 ? val : 120;
+  } catch (e) {
+    console.warn("getDeepWorkDailyTargetMinutes failed in Firestore:", e);
+    return 120;
+  }
+}
+
+export async function setDeepWorkDailyTargetMinutes(min: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const stateRef = doc(db, "users", uid, "meta", "state");
+  await setDoc(
+    stateRef,
+    {
+      deep_work_daily_target_minutes: min,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
 
