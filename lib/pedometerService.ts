@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Pedometer } from "expo-sensors";
 import { Platform } from "react-native";
 import { todayISO } from "@/lib/dateUtils";
-import { saveMetrics } from "./firestoreDatabase";
+import { getMetrics, saveMetrics } from "./firestoreDatabase";
 
 const STEPS_KEY_PREFIX = "detox_steps_daily_";
 export const DEFAULT_STEP_GOAL = 10000;
@@ -34,6 +34,12 @@ export async function getTodaySteps(date?: string): Promise<number> {
     if (raw != null) {
       return parseInt(raw, 10) || 0;
     }
+    const m = await getMetrics(day).catch(() => null);
+    if (m?.steps !== undefined && m.steps !== null) {
+      const v = Number(m.steps);
+      await AsyncStorage.setItem(`${STEPS_KEY_PREFIX}${day}`, String(v)).catch(() => {});
+      return v;
+    }
   } catch {}
   return 0;
 }
@@ -50,20 +56,22 @@ export async function saveDailySteps(steps: number, date?: string): Promise<void
   }
 }
 
-/** Query hardware sensor for steps taken today */
-export async function syncPedometerSensorSteps(): Promise<number | null> {
+/** Query hardware sensor for steps taken in the 24-hour window of a specific date (default: today) */
+export async function syncPedometerSensorSteps(date?: string): Promise<number | null> {
   if (Platform.OS === "web") return null;
+  const day = date ?? todayISO();
+  const isToday = day === todayISO();
+
   try {
     const available = await Pedometer.isAvailableAsync();
     if (!available) return null;
 
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const now = new Date();
+    const startOfDay = new Date(day + "T00:00:00");
+    const endOfDay = isToday ? new Date() : new Date(day + "T23:59:59");
 
-    const result = await Pedometer.getStepCountAsync(startOfDay, now);
+    const result = await Pedometer.getStepCountAsync(startOfDay, endOfDay);
     if (result && typeof result.steps === "number") {
-      await saveDailySteps(result.steps);
+      await saveDailySteps(result.steps, day);
       return result.steps;
     }
   } catch (err) {
@@ -72,18 +80,23 @@ export async function syncPedometerSensorSteps(): Promise<number | null> {
   return null;
 }
 
-/** Subscribe to live step updates while walking */
+/** Subscribe to live step updates while walking (returns incremental step deltas) */
 export function subscribeLivePedometer(
-  onStepIncrement: (newSteps: number) => void,
+  onStepIncrement: (delta: number) => void,
 ): { remove: () => void } {
   if (Platform.OS === "web") {
     return { remove: () => {} };
   }
 
   try {
+    let lastReportedSteps = 0;
     const subscription = Pedometer.watchStepCount((result) => {
       if (result && typeof result.steps === "number") {
-        onStepIncrement(result.steps);
+        const delta = result.steps - lastReportedSteps;
+        if (delta > 0) {
+          lastReportedSteps = result.steps;
+          onStepIncrement(delta);
+        }
       }
     });
     return subscription;

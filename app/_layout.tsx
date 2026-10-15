@@ -162,6 +162,9 @@ function RootLayoutNavInner() {
         }
         if (user) {
           void recordLastActiveNow().catch(() => {});
+          import("@/lib/pedometerService")
+            .then((m) => m.syncPedometerSensorSteps())
+            .catch(() => {});
         }
       }
     });

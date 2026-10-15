@@ -17,7 +17,7 @@ import { Body, Caption, Heading } from "@/components/Typography";
 import {
   getSpiritualChallengesDashboard,
   toggleSpiritualChallengeDay,
-} from "@/lib/database";
+} from "@/lib/firestoreDatabase";
 import type { SpiritualChallengeDashboard } from "@/lib/types";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
@@ -67,7 +67,7 @@ export default function SpiritualChallengesScreen() {
         <Pressable
           onPress={() => {
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            navigation.getParent<DrawerNavigationProp<any>>()?.openDrawer();
+            navigation.openDrawer();
           }}
           hitSlop={12}
         >

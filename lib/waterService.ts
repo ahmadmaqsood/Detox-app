@@ -1,8 +1,8 @@
+import { todayISO } from "@/lib/dateUtils";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
-import { todayISO } from "@/lib/dateUtils";
-import { saveMetrics } from "./firestoreDatabase";
+import { getMetrics, saveMetrics } from "./firestoreDatabase";
 
 const WATER_STORAGE_KEY_PREFIX = "detox_water_glasses_";
 const WATER_REMINDER_KEY = "detox_water_hourly_reminder_enabled";
@@ -19,6 +19,12 @@ export async function getTodayWaterGlasses(date?: string): Promise<number> {
     if (raw != null) {
       return parseInt(raw, 10) || 0;
     }
+    const m = await getMetrics(day).catch(() => null);
+    if (m?.waterGlasses !== undefined && m.waterGlasses !== null) {
+      const v = Number(m.waterGlasses);
+      await AsyncStorage.setItem(`${WATER_STORAGE_KEY_PREFIX}${day}`, String(v)).catch(() => {});
+      return v;
+    }
     return 0;
   } catch {
     return 0;
@@ -31,7 +37,7 @@ export async function setTodayWaterGlasses(count: number, date?: string): Promis
   const sanitized = Math.max(0, count);
   try {
     await AsyncStorage.setItem(`${WATER_STORAGE_KEY_PREFIX}${day}`, String(sanitized));
-    await saveMetrics({ waterGlasses: sanitized, date: day }).catch(() => {});
+    await saveMetrics({ waterGlasses: sanitized, date: day }).catch(() => { });
   } catch (err) {
     console.warn("Failed to save water glasses:", err);
   }
@@ -64,7 +70,7 @@ export async function getWaterHourlyReminderEnabled(): Promise<boolean> {
 export async function setWaterHourlyReminderEnabled(enabled: boolean): Promise<boolean> {
   try {
     await AsyncStorage.setItem(WATER_REMINDER_KEY, enabled ? "true" : "false");
-  } catch {}
+  } catch { }
 
   if (Platform.OS === "web") return enabled;
 
@@ -86,20 +92,33 @@ export async function setWaterHourlyReminderEnabled(enabled: boolean): Promise<b
       if (req.status !== "granted") return false;
     }
 
-    // 3. Schedule reminders every hour from 9:00 to 21:00 (9 AM to 9 PM)
+    // 3. Ensure Android Notification Channel exists
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync("hydration-channel", {
+        name: "Hydration Reminders",
+        description: "Hourly reminders to drink water and stay energized",
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: "default",
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: "#00F5A0",
+      });
+    }
+
+    // 4. Schedule reminders every hour from 9:00 to 21:00 (9 AM to 9 PM)
     for (let hour = 9; hour <= 21; hour += 1) {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: "💧 Time to Hydrate!",
           body: "Drink a fresh glass of water to keep your body and brain energized.",
           sound: true,
-          priority: Notifications.AndroidNotificationPriority.DEFAULT,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
           data: { tag: WATER_NOTIFICATION_TAG, hour },
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.DAILY,
           hour,
           minute: 0,
+          channelId: Platform.OS === "android" ? "hydration-channel" : undefined,
         },
       });
     }

@@ -112,6 +112,13 @@ const LIFE_AREA_LABEL: Record<LifeArea, string> = {
   physical: 'Physical',
   mental: 'Mental',
   work: 'Work',
+  walk: 'Walk',
+  learning: 'Learning',
+  cold_shower: 'Cold Shower',
+  reading: 'Reading',
+  meditation: 'Meditation',
+  stretching: 'Stretching',
+  food: 'Food',
 };
 
 const LIFE_AREA_CHART_COLOR: Record<LifeArea, string> = {
@@ -119,6 +126,13 @@ const LIFE_AREA_CHART_COLOR: Record<LifeArea, string> = {
   physical: '#34D399',
   mental: '#60A5FA',
   work: '#F59E0B',
+  walk: '#10B981',
+  learning: '#818CF8',
+  cold_shower: '#06B6D4',
+  reading: '#EC4899',
+  meditation: '#8B5CF6',
+  stretching: '#F97316',
+  food: '#EAB308',
 };
 
 function relapseTriggerLabel(tag: string): string {

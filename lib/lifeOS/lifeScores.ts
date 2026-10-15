@@ -1,7 +1,7 @@
 import { computeEnergyScore } from "../energyScore";
-import { getExerciseMinutesForDate } from "../database";
 import {
   getEntriesCompletionSummary,
+  getExerciseMinutesForDate,
   getGlobalStreak,
   getHardMode,
   getHardModeStreak,

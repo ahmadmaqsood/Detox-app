@@ -21,17 +21,33 @@ import { HabitsLoadingSkeleton } from "@/components/HabitSkeleton";
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Body, Caption, Heading } from "@/components/Typography";
-import { deleteHabit, getAllHabits, reorderHabits } from "@/lib/firestoreDatabase";
-import { parseHabitIcon, type Habit, type LifeArea } from "@/lib/types";
+import { RoutineExperimentCard } from "@/components/habits/RoutineExperimentCard";
+import {
+  deleteHabit,
+  getAllHabits,
+  getRecentDailyEntries,
+  getRoutineExperiments,
+  reorderHabits,
+} from "@/lib/firestoreDatabase";
+import {
+  parseHabitIcon,
+  type DailyProgressEntry,
+  type Habit,
+  type LifeArea,
+  type Mode,
+  type RoutineExperiment,
+} from "@/lib/types";
 import { useMode } from "@/store/ModeContext";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
 
-type ModeFilter = "home" | "hostel" | "all";
+type ModeFilter = Mode | "all";
 
 const FILTER_SEGMENTS: { label: string; value: ModeFilter }[] = [
   { label: "🏠 Home", value: "home" },
   { label: "🏢 Hostel", value: "hostel" },
+  { label: "💼 Office", value: "office" },
+  { label: "✈️ Travel", value: "travel" },
   { label: "🌐 All", value: "all" },
 ];
 
@@ -40,6 +56,13 @@ const LIFE_AREA_COLORS: Record<LifeArea, string> = {
   physical: "#34D399",
   mental: "#60A5FA",
   work: "#FBBF24",
+  walk: "#10B981",
+  learning: "#818CF8",
+  cold_shower: "#06B6D4",
+  reading: "#EC4899",
+  meditation: "#8B5CF6",
+  stretching: "#F97316",
+  food: "#EAB308",
 };
 
 export default function HabitsScreen() {
@@ -50,6 +73,8 @@ export default function HabitsScreen() {
   const { mode: currentMode } = useMode();
 
   const [habits, setHabits] = useState<Habit[]>([]);
+  const [experiments, setExperiments] = useState<RoutineExperiment[]>([]);
+  const [recentEntries, setRecentEntries] = useState<DailyProgressEntry[]>([]);
   const [filter, setFilter] = useState<ModeFilter>(currentMode);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -64,8 +89,14 @@ export default function HabitsScreen() {
       if (!silent && habitsRef.current.length === 0) {
         setLoading(true);
       }
-      const all = await getAllHabits();
+      const [all, exps, ents] = await Promise.all([
+        getAllHabits(),
+        getRoutineExperiments().catch(() => []),
+        getRecentDailyEntries(30).catch(() => []),
+      ]);
       setHabits(all);
+      setExperiments(exps);
+      setRecentEntries(ents);
     } catch (e) {
       console.error("Failed to load habits", e);
     } finally {
@@ -279,6 +310,32 @@ export default function HabitsScreen() {
             </Caption>
           </Pressable>
         </Animated.View>
+
+        {/* ─── Active Experiments Section (if any) ───────── */}
+        {experiments.filter((e) => e.status === "active").length > 0 && (
+          <View style={{ gap: spacing.sm, marginVertical: spacing.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <Caption variant="caption2" color={t.textMuted} style={{ fontWeight: "700", letterSpacing: 0.8 }}>
+                🧪 ACTIVE ROUTINE EXPERIMENTS ({experiments.filter((e) => e.status === "active").length})
+              </Caption>
+            </View>
+            {experiments
+              .filter((e) => e.status === "active")
+              .map((exp) => {
+                const targetHabit = habits.find((h) => h.id === exp.habitId);
+                if (!targetHabit) return null;
+                return (
+                  <RoutineExperimentCard
+                    key={exp.id}
+                    experiment={exp}
+                    entries={recentEntries}
+                    habit={targetHabit}
+                    onExperimentUpdated={loadData}
+                  />
+                );
+              })}
+          </View>
+        )}
 
         {/* ─── Search Bar ─────────────────────────────────────── */}
         <View style={[styles.searchBox, { backgroundColor: t.card, borderColor: t.border }]}>

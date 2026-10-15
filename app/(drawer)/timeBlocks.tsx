@@ -23,7 +23,7 @@ import {
   getTimeBlockLog,
   getTimeBlocks,
   setTimeBlockLog,
-} from '@/lib/database';
+} from '@/lib/firestoreDatabase';
 import type { TimeBlock, TimeBlockCategory } from '@/lib/types';
 import { useAppTheme } from '@/theme';
 import { radius, spacing } from '@/theme/spacing';

@@ -14,12 +14,20 @@ import {
   getDailyIntervention,
   getModeStreak,
   getMotivationalMessage,
+  getOverallStreak,
+  getRoutineExperiments,
   getTodayHabits,
   recordDailyInterventionAction,
   syncAutoChallengeProgress,
   toggleHabit
 } from "@/lib/firestoreDatabase";
-import { parseHabitIcon, type Challenge, type Habit, type Mode } from "@/lib/types";
+import { parseHabitIcon, type Challenge, type Habit, type HabitDifficultyTier, type Mode, type RoutineExperiment } from "@/lib/types";
+import { getTodayExperimentVariant } from "@/lib/adaptiveHabitEngine";
+import { AdaptiveDateCarousel } from "@/components/habits/AdaptiveDateCarousel";
+import { TimeSlotFilter, type TimeSlotSelection } from "@/components/habits/TimeSlotFilter";
+import { AdaptiveContextChips } from "@/components/habits/AdaptiveContextChips";
+import { ConsistencyRecoveryBanner } from "@/components/habits/ConsistencyRecoveryBanner";
+import { todayISO, addCalendarDays } from "@/lib/dateUtils";
 import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import { useAppearance } from "@/store/AppearanceContext";
 import { useDetox } from "@/store/DetoxContext";
@@ -32,7 +40,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { type DrawerNavigationProp } from "@react-navigation/drawer";
 import * as Haptics from "expo-haptics";
 import { useFocusEffect, useNavigation, useRouter } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from "react-native";
 import Animated, {
   Easing,
@@ -46,12 +54,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-const modeSegments: { label: string; value: Mode }[] = [
-  { label: "Home", value: "home" },
-  { label: "Hostel", value: "hostel" },
-];
-
-type HabitRow = Habit & { completed: number };
+type HabitRow = Habit & { completed: number; completedTier?: HabitDifficultyTier };
 
 export default function TodayScreen() {
   const t = useAppTheme();
@@ -62,6 +65,13 @@ export default function TodayScreen() {
   const { detox, setDetox, streak: detoxStreak, refreshStreak } = useDetox();
   const { hardMode } = useHardMode();
   const { focusLock, frequentOpenWarning, dismissWarning } = useFocusLock();
+
+  // Adaptive routines state
+  const [selectedDate, setSelectedDate] = useState<string>(todayISO());
+  const [selectedSlot, setSelectedSlot] = useState<TimeSlotSelection>("all");
+  const [recoveryHabit, setRecoveryHabit] = useState<Habit | null>(null);
+  const [experiments, setExperiments] = useState<RoutineExperiment[]>([]);
+
   const [habits, setHabits] = useState<HabitRow[]>([]);
   const [loadingHabits, setLoadingHabits] = useState(true);
   const [homeStreak, setHomeStreak] = useState(0);
@@ -78,7 +88,7 @@ export default function TodayScreen() {
   const habitsRef = useRef<HabitRow[]>([]);
   habitsRef.current = habits;
 
-  const loadHabits = useCallback(async (silent = false) => {
+  const loadHabits = useCallback(async (silent = false, targetDate?: string) => {
     if (!getCurrentFirebaseUser()) {
       setHabits([]);
       setHomeStreak(0);
@@ -87,16 +97,34 @@ export default function TodayScreen() {
       setLoadingHabits(false);
       return;
     }
+    const day = targetDate ?? selectedDate ?? todayISO();
     try {
       if (!silent && habitsRef.current.length === 0) {
         setLoadingHabits(true);
       }
-      const [rows, dailyEntry, challengesList] = await Promise.all([
-        getTodayHabits(mode, detox),
-        getDailyEntry().catch(() => null),
+      const yestDate = addCalendarDays(day, -1);
+      const [rows, dailyEntry, yestEntry, challengesList, exps] = await Promise.all([
+        getTodayHabits(mode, detox, false, day),
+        getDailyEntry(day).catch(() => null),
+        getDailyEntry(yestDate).catch(() => null),
         getChallenges().catch(() => []),
+        getRoutineExperiments().catch(() => []),
       ]);
       setHabits(rows);
+      setExperiments(exps);
+
+      // Consistency recovery check
+      if (day === todayISO() && yestEntry?.habits) {
+        const yestDoneIds = new Set(
+          yestEntry.habits.filter((h) => h.completed).map((h) => h.id)
+        );
+        const candidate = rows.find(
+          (h) => !h.completed && !yestDoneIds.has(h.id) && h.difficultyLevels?.minimum
+        );
+        setRecoveryHabit(candidate ?? null);
+      } else {
+        setRecoveryHabit(null);
+      }
 
       const curChall = challengesList.find((c) => c.status === "active") ?? null;
       setActiveChallenge(curChall);
@@ -108,7 +136,7 @@ export default function TodayScreen() {
 
       const [hs, hos] = await Promise.all([
         getModeStreak("home"),
-        getModeStreak("hostel"),
+        getModeStreak(mode === "home" ? "hostel" : mode),
       ]);
       setHomeStreak(hs);
       setHostelStreak(hos);
@@ -121,16 +149,16 @@ export default function TodayScreen() {
     } finally {
       setLoadingHabits(false);
     }
-  }, [mode, detox, refreshStreak]);
+  }, [mode, detox, refreshStreak, selectedDate]);
 
   useFocusEffect(
     useCallback(() => {
       const hasExistingHabits = habitsRef.current.length > 0;
-      loadHabits(hasExistingHabits);
-    }, [loadHabits]),
+      loadHabits(hasExistingHabits, selectedDate);
+    }, [loadHabits, selectedDate]),
   );
 
-  const handleToggle = async (habitId: number) => {
+  const handleToggle = async (habitId: number, tier?: HabitDifficultyTier) => {
     const row = habits.find((h) => h.id === habitId);
     if (hardMode && row && row.completed) {
       Alert.alert(
@@ -144,13 +172,23 @@ export default function TodayScreen() {
     // 1. Instant optimistic update in local state (0ms)
     setHabits((prev) =>
       prev.map((h) =>
-        h.id === habitId ? { ...h, completed: h.completed ? 0 : 1 } : h
+        h.id === habitId
+          ? {
+              ...h,
+              completed: h.completed ? 0 : 1,
+              completedTier: h.completed ? undefined : (tier ?? "standard"),
+            }
+          : h
       )
     );
 
+    if (recoveryHabit?.id === habitId) {
+      setRecoveryHabit(null);
+    }
+
     // 2. Persist to Firestore & sync cache + challenge progression
     try {
-      await toggleHabit(habitId, undefined, mode);
+      await toggleHabit(habitId, selectedDate, mode, tier);
       const challProg = await syncAutoChallengeProgress();
       if (challProg?.completedChallenge) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -159,10 +197,10 @@ export default function TodayScreen() {
           `Congratulations! You completed Challenge #${challProg.completedChallenge.id}: "${challProg.completedChallenge.name}" (+${challProg.completedChallenge.xp} XP)!\n\nNext challenge is now unlocked.`,
         );
       }
-      await loadHabits(true);
+      await loadHabits(true, selectedDate);
     } catch (e) {
       console.error("Failed to toggle habit:", e);
-      await loadHabits(true);
+      await loadHabits(true, selectedDate);
     }
   };
 
@@ -179,8 +217,28 @@ export default function TodayScreen() {
   const pending = habits.length - completed;
   const progress = habits.length > 0 ? completed / habits.length : 0;
 
+  const slotCounts = useMemo(() => {
+    const counts: Partial<Record<TimeSlotSelection, number>> = { all: habits.length };
+    for (const h of habits) {
+      const slot = (h.timeSlot as TimeSlotSelection) ?? "morning";
+      if (slot === "night") {
+        counts.evening = (counts.evening ?? 0) + 1;
+      } else {
+        counts[slot] = (counts[slot] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [habits]);
+
+  const visibleHabits = useMemo(() => {
+    if (selectedSlot === "all") return habits;
+    if (selectedSlot === "evening") {
+      return habits.filter((h) => h.timeSlot === "evening" || h.timeSlot === "night");
+    }
+    return habits.filter((h) => (h.timeSlot ?? "morning") === selectedSlot);
+  }, [habits, selectedSlot]);
+
   const homeOrderActive = false;
-  const visibleHabits = habits;
 
   return (
     <ScrollView
@@ -275,12 +333,36 @@ export default function TodayScreen() {
 
       {/* <DangerZoneStrip danger={dangerZone} t={t} router={router} /> */}
 
-      {/* ─── Mode Toggle ────────────────────────────── */}
-      <SegmentedControl
-        segments={modeSegments}
-        selected={mode}
-        onChange={setMode}
+      {/* ─── Dribbble 5-Day Date Carousel ─────────────── */}
+      <AdaptiveDateCarousel
+        selectedDate={selectedDate}
+        onSelectDate={(d) => {
+          setSelectedDate(d);
+          loadHabits(false, d);
+        }}
       />
+
+      {/* ─── Adaptive Context Planner (Home, Hostel, Office, Travel) ── */}
+      <AdaptiveContextChips
+        currentMode={mode}
+        onSelectMode={(m) => setMode(m)}
+      />
+
+      {/* ─── Dribbble Time-of-Day Filter (Morning, Afternoon, Evening) ── */}
+      <TimeSlotFilter
+        selected={selectedSlot}
+        onChange={setSelectedSlot}
+        counts={slotCounts}
+      />
+
+      {/* ─── Consistency Recovery Banner ───────────────── */}
+      {recoveryHabit && (
+        <ConsistencyRecoveryBanner
+          habit={recoveryHabit}
+          onRecover={(id, tier) => handleToggle(id, tier)}
+          onDismiss={() => setRecoveryHabit(null)}
+        />
+      )}
 
       <ModeDualStreakStrip
         home={homeStreak}
@@ -494,20 +576,25 @@ export default function TodayScreen() {
             </Caption>
           </View>
 
-          {visibleHabits.map((habit, index) => (
-            <HabitCard
-              key={habit.id}
-              habit={habit}
-              index={index}
-              onToggle={handleToggle}
-              onPress={() =>
-                router.push({
-                  pathname: "/habitDetail",
-                  params: { id: String(habit.id) },
-                })
-              }
-            />
-          ))}
+          {visibleHabits.map((habit, index) => {
+            const activeExp = experiments.find((e) => e.habitId === habit.id && e.status === "active");
+            return (
+              <HabitCard
+                key={habit.id}
+                habit={habit}
+                index={index}
+                activeExperiment={activeExp}
+                targetDate={selectedDate}
+                onToggle={handleToggle}
+                onPress={() =>
+                  router.push({
+                    pathname: "/habitDetail",
+                    params: { id: String(habit.id) },
+                  })
+                }
+              />
+            );
+          })}
         </View>
       )}
     </ScrollView>
@@ -877,42 +964,66 @@ function ModeDualStreakStrip({
   active: Mode;
   t: ReturnType<typeof useAppTheme>;
 }) {
+  const isHomeActive = active === "home";
+  const isRightActive = active !== "home";
+  const rightLabel =
+    active === "office" ? "Office" : active === "travel" ? "Travel" : "Hostel";
+
   return (
     <View style={styles.modeStreakRow}>
+      {/* ─── Home Card ─── */}
       <View
         style={[
           styles.modeStreakCard,
           {
             backgroundColor: t.card,
-            borderColor: active === "home" ? t.accent : t.border,
+            borderColor: isHomeActive ? t.accent : t.border,
           },
-          active === "home" && styles.modeStreakCardActive,
+          isHomeActive && styles.modeStreakCardActive,
         ]}
       >
-        <Caption variant="caption2" color={t.textMuted}>
+        <Caption
+          variant="caption2"
+          color={isHomeActive ? t.accent : t.textMuted}
+          style={{ fontWeight: "600" }}
+        >
           Home
         </Caption>
-        <Heading variant="largeTitle" color={t.accent} style={styles.modeStreakNum}>
+        <Heading
+          variant="largeTitle"
+          color={isHomeActive ? t.accent : t.textPrimary}
+          style={styles.modeStreakNum}
+        >
           {home}
         </Heading>
         <Caption variant="caption2" color={t.textSecondary}>
           {home === 1 ? "strong day" : "strong days"} in a row
         </Caption>
       </View>
+
+      {/* ─── Hostel / Active Mode Card ─── */}
       <View
         style={[
           styles.modeStreakCard,
           {
             backgroundColor: t.card,
-            borderColor: active === "hostel" ? t.accent : t.border,
+            borderColor: isRightActive ? t.accent : t.border,
           },
-          active === "hostel" && styles.modeStreakCardActive,
+          isRightActive && styles.modeStreakCardActive,
         ]}
       >
-        <Caption variant="caption2" color={t.textMuted}>
-          Hostel
+        <Caption
+          variant="caption2"
+          color={isRightActive ? t.accent : t.textMuted}
+          style={{ fontWeight: "600" }}
+        >
+          {rightLabel}
         </Caption>
-        <Heading variant="largeTitle" color={t.accent} style={styles.modeStreakNum}>
+        <Heading
+          variant="largeTitle"
+          color={isRightActive ? t.accent : t.textPrimary}
+          style={styles.modeStreakNum}
+        >
           {hostel}
         </Heading>
         <Caption variant="caption2" color={t.textSecondary}>
@@ -1291,13 +1402,17 @@ function StatPill({
 function HabitCard({
   habit,
   index,
+  activeExperiment,
+  targetDate,
   onToggle,
   onPress,
   minimal,
 }: {
   habit: HabitRow;
   index: number;
-  onToggle: (id: number) => void;
+  activeExperiment?: RoutineExperiment;
+  targetDate?: string;
+  onToggle: (id: number, tier?: HabitDifficultyTier) => void;
   onPress: () => void;
   minimal?: boolean;
 }) {
@@ -1305,6 +1420,11 @@ function HabitCard({
   const icon = parseHabitIcon(habit.icon);
   const isDone = habit.completed === 1;
   const itemProgress = isDone ? 1 : 0;
+  const neonLime = "#D4FE33";
+
+  const todayExpVariant = activeExperiment
+    ? getTodayExperimentVariant(activeExperiment, targetDate)
+    : null;
 
   const checkScale = useSharedValue(1);
   const checkRotate = useSharedValue(0);
@@ -1340,6 +1460,10 @@ function HabitCard({
     });
     onToggle(habit.id);
   };
+
+  const hasTiers = Boolean(
+    habit.difficultyLevels?.minimum || habit.difficultyLevels?.ambitious
+  );
 
   return (
     <Animated.View
@@ -1402,6 +1526,107 @@ function HabitCard({
                     </View>
                   )}
                 </View>
+
+                {/* Stacking anchor & Time slot badge row */}
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 2 }}>
+                  {habit.stackAnchorName && (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 3,
+                        backgroundColor: neonLime + "18",
+                        borderColor: neonLime + "50",
+                        borderWidth: 1,
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Ionicons name="link" size={10} color={neonLime} />
+                      <Caption variant="caption2" color={neonLime} style={{ fontWeight: "700" }}>
+                        After {habit.stackAnchorName}
+                      </Caption>
+                    </View>
+                  )}
+                  {habit.timeSlot && habit.timeSlot !== "anytime" && (
+                    <View
+                      style={{
+                        backgroundColor: t.borderLight,
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Caption variant="caption2" color={t.textMuted} style={{ textTransform: "capitalize", fontSize: 10 }}>
+                        {habit.timeSlot === "morning"
+                          ? "🌅 Morning"
+                          : habit.timeSlot === "afternoon"
+                            ? "☀️ Afternoon"
+                            : habit.timeSlot === "evening"
+                              ? "🌙 Evening"
+                              : "✨ Night"}
+                      </Caption>
+                    </View>
+                  )}
+                  {todayExpVariant && (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 3,
+                        backgroundColor: "#60A5FA18",
+                        borderColor: "#60A5FA50",
+                        borderWidth: 1,
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Ionicons name="flask" size={10} color="#60A5FA" />
+                      <Caption variant="caption2" color="#60A5FA" style={{ fontWeight: "700", fontSize: 10 }}>
+                        {todayExpVariant.variantLetter}: {todayExpVariant.variant.label}
+                      </Caption>
+                    </View>
+                  )}
+                  {habit.completedTier && (
+                    <View
+                      style={{
+                        backgroundColor:
+                          habit.completedTier === "minimum"
+                            ? neonLime + "20"
+                            : habit.completedTier === "ambitious"
+                              ? "#FBBF2420"
+                              : habit.color + "20",
+                        borderColor:
+                          habit.completedTier === "minimum"
+                            ? neonLime
+                            : habit.completedTier === "ambitious"
+                              ? "#FBBF24"
+                              : habit.color,
+                        borderWidth: 1,
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Caption
+                        variant="caption2"
+                        color={
+                          habit.completedTier === "minimum"
+                            ? neonLime
+                            : habit.completedTier === "ambitious"
+                              ? "#FBBF24"
+                              : habit.color
+                        }
+                        style={{ fontWeight: "700", textTransform: "uppercase", fontSize: 9 }}
+                      >
+                        {habit.completedTier}
+                      </Caption>
+                    </View>
+                  )}
+                </View>
+
                 {habit.targetPerDay > 1 && !minimal && (
                   <Caption variant="caption2" color={t.textMuted}>
                     Target: {habit.targetPerDay}x daily
@@ -1428,6 +1653,69 @@ function HabitCard({
               </Animated.View>
             </View>
 
+            {/* Elastic Difficulty Tiers Selector */}
+            {hasTiers && (
+              <View style={styles.tierChipsRow}>
+                {habit.difficultyLevels?.minimum && (
+                  <Pressable
+                    onPress={() => onToggle(habit.id, "minimum")}
+                    style={[
+                      styles.tierPill,
+                      { borderColor: t.borderLight },
+                      habit.completedTier === "minimum" && { backgroundColor: neonLime + "25", borderColor: neonLime },
+                    ]}
+                  >
+                    <Caption
+                      variant="caption2"
+                      color={habit.completedTier === "minimum" ? neonLime : t.textMuted}
+                      style={{ fontWeight: "600", fontSize: 10 }}
+                    >
+                      Min: {habit.difficultyLevels.minimum}
+                    </Caption>
+                  </Pressable>
+                )}
+                {habit.difficultyLevels?.standard && (
+                  <Pressable
+                    onPress={() => onToggle(habit.id, "standard")}
+                    style={[
+                      styles.tierPill,
+                      { borderColor: t.borderLight },
+                      (!habit.completedTier || habit.completedTier === "standard") && isDone && {
+                        backgroundColor: habit.color + "25",
+                        borderColor: habit.color,
+                      },
+                    ]}
+                  >
+                    <Caption
+                      variant="caption2"
+                      color={(!habit.completedTier || habit.completedTier === "standard") && isDone ? habit.color : t.textMuted}
+                      style={{ fontWeight: "600", fontSize: 10 }}
+                    >
+                      Std: {habit.difficultyLevels.standard}
+                    </Caption>
+                  </Pressable>
+                )}
+                {habit.difficultyLevels?.ambitious && (
+                  <Pressable
+                    onPress={() => onToggle(habit.id, "ambitious")}
+                    style={[
+                      styles.tierPill,
+                      { borderColor: t.borderLight },
+                      habit.completedTier === "ambitious" && { backgroundColor: "#FBBF2425", borderColor: "#FBBF24" },
+                    ]}
+                  >
+                    <Caption
+                      variant="caption2"
+                      color={habit.completedTier === "ambitious" ? "#FBBF24" : t.textMuted}
+                      style={{ fontWeight: "600", fontSize: 10 }}
+                    >
+                      Amb: {habit.difficultyLevels.ambitious}
+                    </Caption>
+                  </Pressable>
+                )}
+              </View>
+            )}
+
             <View style={styles.habitProgressBlock}>
               <View style={styles.habitBarTrack}>
                 <ProgressBar
@@ -1440,7 +1728,7 @@ function HabitCard({
                 variant="caption2"
                 color={isDone ? habit.color : t.textMuted}
               >
-                {isDone ? "Done" : "Pending"}
+                {isDone ? (habit.completedTier ? `${habit.completedTier.toUpperCase()} DONE` : "Done") : "Pending"}
               </Caption>
             </View>
           </View>
@@ -1865,6 +2153,22 @@ const styles = StyleSheet.create({
   },
   habitBarTrack: {
     width: "100%",
+  },
+  tierChipsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  tierPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.full,
+    borderWidth: 1,
   },
   activeChallengeCard: {
     borderRadius: radius.xl,

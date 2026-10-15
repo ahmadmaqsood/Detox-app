@@ -23,14 +23,15 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { Body, Caption, Heading } from "@/components/Typography";
+import { computeEnergyScore } from "@/lib/energyScore";
 import {
   getBodyWeights,
   getGoalWeightKg,
+  getMetrics,
   logBodyWeight,
+  saveMetrics,
   setGoalWeightKg,
-} from "@/lib/database";
-import { computeEnergyScore } from "@/lib/energyScore";
-import { getMetrics, saveMetrics } from "@/lib/firestoreDatabase";
+} from "@/lib/firestoreDatabase";
 import {
   computeStepMetrics,
   DEFAULT_STEP_GOAL,
@@ -41,18 +42,18 @@ import {
   syncPedometerSensorSteps,
   type StepMetricsSummary,
 } from "@/lib/pedometerService";
+import type { EnergyLevel, Metrics, MoodState } from "@/lib/types";
 import {
   addWaterGlass,
   DEFAULT_GLASS_TARGET,
-  GLASS_ML,
   getTodayWaterGlasses,
   getWaterHourlyReminderEnabled,
+  GLASS_ML,
   removeWaterGlass,
   setWaterHourlyReminderEnabled,
 } from "@/lib/waterService";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
-import type { EnergyLevel, MoodState } from "@/lib/types";
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -109,6 +110,7 @@ export default function BodyScreen() {
 
   // History & charts
   const [chartDays, setChartDays] = useState<{ date: string; dayNum: number; steps: number }[]>([]);
+  const [metricsByDate, setMetricsByDate] = useState<Record<string, Metrics>>({});
   const [weightsHistory, setWeightsHistory] = useState<{ date: string; kg: number }[]>([]);
 
   // Modals
@@ -143,7 +145,7 @@ export default function BodyScreen() {
     setPedometerActive(available);
 
     const [hardwareSteps, savedSteps] = await Promise.all([
-      syncPedometerSensorSteps(),
+      syncPedometerSensorSteps(day),
       getTodaySteps(day),
     ]);
     const currentSteps = hardwareSteps != null ? hardwareSteps : savedSteps;
@@ -195,20 +197,30 @@ export default function BodyScreen() {
     if (latestW) setWeightKg(latestW.kg);
     setWeightsHistory(weights7);
 
-    // 4. Build 9-day horizontal bar chart array (e.g., matching Dribbble date columns 12..20)
+    // 4. Build 9-day horizontal bar chart array with REAL Firestore data (NO HARDCODED/RANDOM NUMBERS)
     const daysArr: { date: string; dayNum: number; steps: number }[] = [];
+    const mByDate: Record<string, Metrics> = {};
+
     for (let i = 5; i >= -3; i--) {
       const d = addDays(day, -i);
       const dayNum = parseInt(d.slice(8, 10), 10);
       let s = 0;
       if (d === day) {
         s = currentSteps;
-      } else {
+        if (todayMetrics) {
+          mByDate[d] = { ...todayMetrics, steps: currentSteps };
+        }
+      } else if (i > 0) {
+        // Query real past metrics
         const m = await getMetrics(d);
-        s = m?.steps ?? (i > 0 ? Math.floor(2500 + Math.random() * 2000) : 0);
+        if (m) {
+          mByDate[d] = m;
+          s = m.steps ?? 0;
+        }
       }
       daysArr.push({ date: d, dayNum, steps: s });
     }
+    setMetricsByDate(mByDate);
     setChartDays(daysArr);
   }, [day]);
 
@@ -225,44 +237,108 @@ export default function BodyScreen() {
       setSteps((prev) => {
         const next = prev + delta;
         saveDailySteps(next, day);
-        saveMetrics({ date: day, steps: next }).catch(() => {});
+        saveMetrics({ date: day, steps: next }).catch(() => { });
         return next;
       });
     });
     return () => sub.remove();
   }, [day]);
 
-  // Derived step & calories metrics
-  const stepMetrics: StepMetricsSummary = useMemo(() => {
-    return computeStepMetrics(steps, stepGoal);
-  }, [steps, stepGoal]);
+  // Is viewing today or a historical date
+  const isViewingToday = selectedDayISO === day;
 
-  // Calories: burned from steps + workout minutes + baseline
+  const selectedDateLabel = useMemo(() => {
+    const d = new Date(selectedDayISO + "T12:00:00");
+    return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  }, [selectedDayISO]);
+
+  // Unified metrics for the selected active day (supports clicking any bar)
+  const activeDayMetrics = useMemo(() => {
+    if (isViewingToday) {
+      return {
+        steps,
+        waterGlasses,
+        sleepMinutes,
+        bedTime,
+        wakeTime,
+        weightKg,
+        heightCm,
+        walkMinutes,
+        workoutMinutes,
+        stretchingMinutes,
+        outdoorMinutes,
+        energyRating,
+        moodRating,
+      };
+    }
+    const m = metricsByDate[selectedDayISO];
+    const chartDay = chartDays.find((c) => c.date === selectedDayISO);
+    return {
+      steps: m?.steps ?? (chartDay?.steps ?? 0),
+      waterGlasses: m?.waterGlasses ?? 0,
+      sleepMinutes: m?.sleepMinutes ?? 0,
+      bedTime: m?.bedTime ?? "23:00",
+      wakeTime: m?.wakeTime ?? "07:00",
+      weightKg: m?.weightKg ?? weightKg,
+      heightCm: m?.heightCm ?? heightCm,
+      walkMinutes: m?.walkMinutes ?? 0,
+      workoutMinutes: m?.workoutMinutes ?? 0,
+      stretchingMinutes: m?.stretchingMinutes ?? 0,
+      outdoorMinutes: m?.outdoorMinutes ?? 0,
+      energyRating: m?.energyRating ?? null,
+      moodRating: m?.moodRating ?? null,
+    };
+  }, [
+    isViewingToday,
+    selectedDayISO,
+    metricsByDate,
+    chartDays,
+    steps,
+    waterGlasses,
+    sleepMinutes,
+    bedTime,
+    wakeTime,
+    weightKg,
+    heightCm,
+    walkMinutes,
+    workoutMinutes,
+    stretchingMinutes,
+    outdoorMinutes,
+    energyRating,
+    moodRating,
+  ]);
+
+  // Derived step metrics for active day
+  const activeStepMetrics: StepMetricsSummary = useMemo(() => {
+    return computeStepMetrics(activeDayMetrics.steps, stepGoal);
+  }, [activeDayMetrics.steps, stepGoal]);
+
+  // Calories: burned from active day's steps + workout minutes + walk minutes
   const totalCaloriesKcal = useMemo(() => {
-    const fromSteps = Math.round(steps * 0.04);
-    const fromWorkouts = Math.round(workoutMinutes * 7.5);
-    const fromWalk = Math.round(walkMinutes * 4.2);
-    return Math.max(fromSteps + fromWorkouts + fromWalk, stepMetrics.caloriesKcal);
-  }, [steps, workoutMinutes, walkMinutes, stepMetrics.caloriesKcal]);
+    const fromSteps = Math.round(activeDayMetrics.steps * 0.04);
+    const fromWorkouts = Math.round(activeDayMetrics.workoutMinutes * 7.5);
+    const fromWalk = Math.round(activeDayMetrics.walkMinutes * 4.2);
+    return Math.max(fromSteps + fromWorkouts + fromWalk, activeStepMetrics.caloriesKcal);
+  }, [activeDayMetrics.steps, activeDayMetrics.workoutMinutes, activeDayMetrics.walkMinutes, activeStepMetrics.caloriesKcal]);
 
-  // Calories ring percentage (based on target 2,500 kcal or 6,000 kcal)
+  // Calories ring percentage (based on target 2,500 kcal)
   const caloriesPct = useMemo(() => {
     const target = 2500;
     return Math.min(100, Math.round((totalCaloriesKcal / target) * 100));
   }, [totalCaloriesKcal]);
 
-  // Water ring percentage (based on target 2,500 ml)
-  const waterMl = waterGlasses * GLASS_ML;
+  // Water ring percentage (based on target 2,000 ml)
+  const waterMl = activeDayMetrics.waterGlasses * GLASS_ML;
   const waterTargetMl = DEFAULT_GLASS_TARGET * GLASS_ML;
   const waterPct = Math.min(100, Math.round((waterMl / waterTargetMl) * 100));
 
   // Sleep formatted
-  const sleepHours = (sleepMinutes / 60).toFixed(2);
+  const sleepHours = (activeDayMetrics.sleepMinutes / 60).toFixed(2);
   const sleepFormatted = useMemo(() => {
-    const h = Math.floor(sleepMinutes / 60);
-    const m = sleepMinutes % 60;
+    const h = Math.floor(activeDayMetrics.sleepMinutes / 60);
+    const m = activeDayMetrics.sleepMinutes % 60;
     return `${h}h ${m}m`;
-  }, [sleepMinutes]);
+  }, [activeDayMetrics.sleepMinutes]);
 
   // BMI Info
   const bmiInfo = useMemo(() => {
@@ -312,15 +388,6 @@ export default function BodyScreen() {
   }, [yesterdaySleepMins, yesterdayScreenTime, bedTime, wakeTime, energyComposite.score]);
 
   // Handlers
-  const handleQuickAddSteps = async (amount: number) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const next = steps + amount;
-    setSteps(next);
-    await saveDailySteps(next, day);
-    await saveMetrics({ date: day, steps: next });
-    load();
-  };
-
   const handleAddGlass = async () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const next = await addWaterGlass(day);
@@ -513,7 +580,7 @@ export default function BodyScreen() {
             <View style={styles.stepsNumbersRow}>
               <View style={styles.stepNumCol}>
                 <Heading variant="title1" style={styles.boldFigure}>
-                  {steps.toLocaleString()}
+                  {activeDayMetrics.steps.toLocaleString()}
                 </Heading>
                 <Caption variant="caption1" color={t.textMuted} style={styles.figureUnit}>
                   steps
@@ -522,7 +589,7 @@ export default function BodyScreen() {
 
               <View style={styles.stepNumCol}>
                 <Heading variant="title1" style={styles.boldFigure}>
-                  {stepMetrics.distanceKm}
+                  {activeStepMetrics.distanceKm}
                 </Heading>
                 <Caption variant="caption1" color={t.textMuted} style={styles.figureUnit}>
                   km
@@ -530,12 +597,12 @@ export default function BodyScreen() {
               </View>
             </View>
 
-            {/* Horizontal Date Bar Chart with Floating Pill */}
+            {/* Horizontal Date Bar Chart with Centered Floating Pill */}
             <View style={styles.dateBarChartContainer}>
               {chartDays.map((item) => {
                 const isSelected = item.date === selectedDayISO;
                 const isToday = item.date === day;
-                const heightPct = Math.max(18, Math.min(100, Math.round((item.steps / maxStepsInChart) * 100)));
+                const heightPct = Math.max(16, Math.min(100, Math.round((item.steps / maxStepsInChart) * 100)));
 
                 return (
                   <Pressable
@@ -549,20 +616,20 @@ export default function BodyScreen() {
                     {/* Floating Pill on Active / Selected Day */}
                     {isSelected && (
                       <View style={styles.floatingPillBadge}>
-                        <Caption variant="caption2" color="#fff" style={{ fontWeight: "700", fontSize: 10 }}>
-                          {item.steps > 0 ? item.steps.toLocaleString() : steps.toLocaleString()}
+                        <Caption variant="caption2" color="#fff" style={{ fontWeight: "800", fontSize: 10 }}>
+                          {item.steps > 0 ? item.steps.toLocaleString() : "0"}
                         </Caption>
                       </View>
                     )}
 
                     {/* Bar Cylinder */}
-                    <View style={[styles.barCylinderTrack, { backgroundColor: t.border + "44" }]}>
+                    <View style={[styles.barCylinderTrack, { backgroundColor: isSelected ? "#10B98122" : t.border + "33" }]}>
                       <View
                         style={[
                           styles.barCylinderFill,
                           {
                             height: `${heightPct}%`,
-                            backgroundColor: isSelected ? "#22C55E" : "#86EFAC66",
+                            backgroundColor: isSelected ? "#10B981" : "#10B98155",
                           },
                         ]}
                       />
@@ -571,10 +638,10 @@ export default function BodyScreen() {
                     {/* Day number */}
                     <Caption
                       variant="caption2"
-                      color={isSelected ? t.textPrimary : t.textMuted}
+                      color={isSelected ? "#10B981" : t.textMuted}
                       style={[
                         styles.dayNumberLabel,
-                        isSelected && { fontWeight: "700", color: "#10B981" },
+                        isSelected && { fontWeight: "800", color: "#10B981" },
                       ]}
                     >
                       {item.dayNum}
@@ -584,36 +651,26 @@ export default function BodyScreen() {
               })}
             </View>
 
-            {/* Quick sensor test / manual adders */}
-            <View style={styles.sensorAddersRow}>
-              <Caption variant="caption2" color={t.textMuted}>
-                {pedometerActive ? "📱 Sensor Active" : "📱 Manual walk log"}:
-              </Caption>
-              <Pressable
-                onPress={() => handleQuickAddSteps(250)}
-                style={[styles.quickAdderBtn, { backgroundColor: t.background }]}
-              >
-                <Caption variant="caption2" color="#10B981" style={{ fontWeight: "700" }}>
-                  +250
+            {/* Active Date Context Banner if viewing historical day (replaces manual walk log) */}
+            {!isViewingToday && (
+              <View style={[styles.historicalBanner, { backgroundColor: t.background }]}>
+                <PlatformSymbol ios="calendar" material="event" tintColor="#10B981" size={14} />
+                <Caption variant="caption2" color="#10B981" style={{ fontWeight: "700", marginLeft: 6, flex: 1 }}>
+                  Viewing {selectedDateLabel}
                 </Caption>
-              </Pressable>
-              <Pressable
-                onPress={() => handleQuickAddSteps(500)}
-                style={[styles.quickAdderBtn, { backgroundColor: t.background }]}
-              >
-                <Caption variant="caption2" color="#10B981" style={{ fontWeight: "700" }}>
-                  +500
-                </Caption>
-              </Pressable>
-              <Pressable
-                onPress={() => handleQuickAddSteps(1000)}
-                style={[styles.quickAdderBtn, { backgroundColor: t.background }]}
-              >
-                <Caption variant="caption2" color="#10B981" style={{ fontWeight: "700" }}>
-                  +1k
-                </Caption>
-              </Pressable>
-            </View>
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setSelectedDayISO(day);
+                  }}
+                  style={styles.returnTodayBtn}
+                >
+                  <Caption variant="caption2" color="#fff" style={{ fontWeight: "700" }}>
+                    Return to Today
+                  </Caption>
+                </Pressable>
+              </View>
+            )}
           </Card>
         </Animated.View>
 
@@ -711,25 +768,33 @@ export default function BodyScreen() {
                 </View>
               </View>
 
-              {/* 1-tap +250ml action */}
-              <View style={styles.waterQuickAddRow}>
-                <Pressable
-                  onPress={handleRemoveGlass}
-                  disabled={waterGlasses <= 0}
-                  style={[styles.waterMiniBtn, { opacity: waterGlasses <= 0 ? 0.3 : 1 }]}
-                >
-                  <Caption variant="caption2" color={t.textMuted}>-</Caption>
-                </Pressable>
-                <Pressable
-                  onPress={handleAddGlass}
-                  style={[styles.waterPlusBtn, { backgroundColor: "#0EA5E9" }]}
-                >
-                  <PlatformSymbol ios="plus" material="add" tintColor="#fff" size={12} />
-                  <Caption variant="caption2" color="#fff" style={{ fontWeight: "700", marginLeft: 2 }}>
-                    +250ml
+              {/* 1-tap +250ml action when today, or glasses count when viewing history */}
+              {isViewingToday ? (
+                <View style={styles.waterQuickAddRow}>
+                  <Pressable
+                    onPress={handleRemoveGlass}
+                    disabled={waterGlasses <= 0}
+                    style={[styles.waterMiniBtn, { opacity: waterGlasses <= 0 ? 0.3 : 1 }]}
+                  >
+                    <Caption variant="caption2" color={t.textMuted}>-</Caption>
+                  </Pressable>
+                  <Pressable
+                    onPress={handleAddGlass}
+                    style={[styles.waterPlusBtn, { backgroundColor: "#0EA5E9" }]}
+                  >
+                    <PlatformSymbol ios="plus" material="add" tintColor="#fff" size={12} />
+                    <Caption variant="caption2" color="#fff" style={{ fontWeight: "700", marginLeft: 2 }}>
+                      +250ml
+                    </Caption>
+                  </Pressable>
+                </View>
+              ) : (
+                <View style={styles.waterHistoricalRow}>
+                  <Caption variant="caption2" color={t.textMuted}>
+                    {activeDayMetrics.waterGlasses} glasses ({waterMl}ml)
                   </Caption>
-                </Pressable>
-              </View>
+                </View>
+              )}
             </Card>
 
             {/* Card 3: Sleep */}
@@ -768,7 +833,7 @@ export default function BodyScreen() {
                 <View style={styles.vitalCardContentRow}>
                   <View>
                     <Heading variant="title1" style={styles.boldVitalFigure}>
-                      {sleepMinutes > 0 ? sleepHours : "7.30"}
+                      {activeDayMetrics.sleepMinutes > 0 ? sleepHours : "--"}
                     </Heading>
                     <Caption variant="caption1" color={t.textMuted}>
                       hrs
@@ -787,7 +852,7 @@ export default function BodyScreen() {
                 {/* Sleep & Wake Times */}
                 <View style={styles.sleepScheduleRow}>
                   <Caption variant="caption2" color={t.textMuted}>
-                    🌙 {bedTime} • ☀️ {wakeTime}
+                    🌙 {activeDayMetrics.bedTime} • ☀️ {activeDayMetrics.wakeTime}
                   </Caption>
                 </View>
               </Pressable>
@@ -825,7 +890,7 @@ export default function BodyScreen() {
                 <View style={styles.vitalCardContentRow}>
                   <View>
                     <Heading variant="title1" style={styles.boldVitalFigure}>
-                      {weightKg ? weightKg : "92"}
+                      {activeDayMetrics.weightKg ? activeDayMetrics.weightKg : "--"}
                     </Heading>
                     <Caption variant="caption1" color={t.textMuted}>
                       kg
@@ -863,9 +928,6 @@ export default function BodyScreen() {
           <Card style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
               <Heading variant="title3">Movement & Outdoor Log</Heading>
-              <Caption variant="caption2" color={t.textMuted}>
-                Physical Vitality
-              </Caption>
             </View>
 
             <View style={styles.movementGrid}>
@@ -874,7 +936,7 @@ export default function BodyScreen() {
                 <View style={styles.movementItemTop}>
                   <Caption variant="caption1" style={{ fontWeight: "700" }}>🚶 Walking</Caption>
                   <Caption variant="caption2" color={t.accent} style={{ fontWeight: "700" }}>
-                    {walkMinutes}m
+                    {activeDayMetrics.walkMinutes}m
                   </Caption>
                 </View>
                 <View style={styles.movementActions}>
@@ -898,7 +960,7 @@ export default function BodyScreen() {
                 <View style={styles.movementItemTop}>
                   <Caption variant="caption1" style={{ fontWeight: "700" }}>🏋️ Workout</Caption>
                   <Caption variant="caption2" color="#F97316" style={{ fontWeight: "700" }}>
-                    {workoutMinutes}m
+                    {activeDayMetrics.workoutMinutes}m
                   </Caption>
                 </View>
                 <View style={styles.movementActions}>
@@ -922,7 +984,7 @@ export default function BodyScreen() {
                 <View style={styles.movementItemTop}>
                   <Caption variant="caption1" style={{ fontWeight: "700" }}>🧘 Stretching</Caption>
                   <Caption variant="caption2" color="#A78BFA" style={{ fontWeight: "700" }}>
-                    {stretchingMinutes}m
+                    {activeDayMetrics.stretchingMinutes}m
                   </Caption>
                 </View>
                 <View style={styles.movementActions}>
@@ -946,7 +1008,7 @@ export default function BodyScreen() {
                 <View style={styles.movementItemTop}>
                   <Caption variant="caption1" style={{ fontWeight: "700" }}>🌳 Sunlight</Caption>
                   <Caption variant="caption2" color="#F59E0B" style={{ fontWeight: "700" }}>
-                    {outdoorMinutes}m
+                    {activeDayMetrics.outdoorMinutes}m
                   </Caption>
                 </View>
                 <View style={styles.movementActions}>
@@ -973,9 +1035,6 @@ export default function BodyScreen() {
           <Card style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
               <Heading variant="title3">Daily Energy & Mood Check-in</Heading>
-              <Caption variant="caption2" color={t.textMuted}>
-                Self-Reported State
-              </Caption>
             </View>
 
             {/* Energy Selector */}
@@ -1096,7 +1155,7 @@ export default function BodyScreen() {
               <View style={[styles.yestBox, { backgroundColor: t.background }]}>
                 <Caption variant="caption2" color={t.textMuted}>Today Energy</Caption>
                 <Heading variant="title3" color="#10B981" style={{ marginTop: 2 }}>
-                  {energyRating ? energyRating.toUpperCase() : "BALANCED"}
+                  {energyRating ? energyRating.toUpperCase() : "Balanced"}
                 </Heading>
               </View>
             </View>
@@ -1371,16 +1430,18 @@ const styles = StyleSheet.create({
   },
   floatingPillBadge: {
     position: "absolute",
-    top: -20,
+    top: 0,
     backgroundColor: "#18181B",
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: "#10B981",
     zIndex: 10,
     elevation: 4,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
+    shadowOpacity: 0.35,
     shadowRadius: 3,
   },
   barCylinderTrack: {
@@ -1398,19 +1459,25 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontWeight: "600",
   },
-  sensorAddersRow: {
+  historicalBanner: {
     flexDirection: "row",
     alignItems: "center",
-    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    borderRadius: radius.md,
     marginTop: spacing.md,
-    paddingTop: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(150,150,150,0.1)",
+    borderWidth: 1,
+    borderColor: "#10B98144",
   },
-  quickAdderBtn: {
-    paddingHorizontal: 8,
+  returnTodayBtn: {
+    backgroundColor: "#10B981",
+    paddingHorizontal: 12,
     paddingVertical: 4,
-    borderRadius: radius.sm,
+    borderRadius: radius.full,
+  },
+  waterHistoricalRow: {
+    paddingVertical: 4,
+    alignItems: "center",
   },
 
   // 2. 2x2 Vital Grid
@@ -1522,7 +1589,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
   },
   sectionHeader: {
-    flexDirection: "row",
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: spacing.md,
@@ -1574,6 +1641,7 @@ const styles = StyleSheet.create({
   scoreBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,
+    marginVertical: 5,
     borderRadius: radius.full,
   },
   yesterdayMetricsRow: {

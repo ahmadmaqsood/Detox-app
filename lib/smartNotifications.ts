@@ -1,9 +1,13 @@
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
-import { getAntiLazinessEnabled } from "@/lib/database";
 import { getFirebaseAuth } from "@/lib/firebase";
-import { getHardMode, getInsightSignals, getMetrics } from "@/lib/firestoreDatabase";
+import {
+  getAntiLazinessEnabled,
+  getHardMode,
+  getInsightSignals,
+  getMetrics,
+} from "@/lib/firestoreDatabase";
 import { getNotificationsEnabled } from "@/lib/notificationPrefs";
 
 let handlerInstalled = false;

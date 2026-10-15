@@ -42,18 +42,18 @@ export function GlassTabBar(props: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
 
-  const bottomPad = Math.max(insets.bottom, 10);
-  // Lift the whole bar slightly above the bottom edge.
-  const floatAbove = 10;
-
   const onPlus = () => {
     router.push("/addHabit");
   };
 
-  const stateByName = new Map(props.state.routes.map((r) => [r.name, r]));
-
   return (
-    <View pointerEvents="box-none" style={styles.root}>
+    <View
+      pointerEvents="box-none"
+      style={[
+        styles.root,
+        { paddingBottom: Math.max(insets.bottom, Platform.OS === "ios" ? 12 : 10) + 4 },
+      ]}
+    >
       <View
         style={[
           styles.bar,
@@ -61,7 +61,6 @@ export function GlassTabBar(props: BottomTabBarProps) {
             backgroundColor: "rgba(10, 15, 25, 0.94)",
             borderColor: "rgba(255, 255, 255, 0.14)",
             shadowColor: "#000",
-            paddingBottom: bottomPad,
           },
         ]}
       >
@@ -160,16 +159,15 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     paddingHorizontal: spacing.lg,
-    paddingBottom: (Platform.OS === "ios" ? spacing.xs : spacing.sm) + 10,
   },
   bar: {
     flexDirection: "row",
-    alignItems: "flex-end",
+    alignItems: "center",
     justifyContent: "space-between",
     borderRadius: radius.full,
     borderWidth: 1,
-    paddingTop: spacing.sm,
-    paddingHorizontal: spacing.lg,
+    height: 64,
+    paddingHorizontal: spacing.md,
     ...Platform.select({
       ios: {
         shadowOpacity: 0.22,
@@ -187,10 +185,10 @@ const styles = StyleSheet.create({
     }),
   },
   item: {
-    width: 56,
+    width: 52,
+    height: 64,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: spacing.sm,
   },
   iconWrap: {
     width: 42,
@@ -200,16 +198,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   plusSlot: {
-    width: 70,
-    alignItems: "center",
-  },
-  plusBtn: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: 66,
+    height: 64,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: -22,
+  },
+  plusBtn: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: -16,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.18)",
     ...Platform.select({
@@ -229,4 +229,5 @@ const styles = StyleSheet.create({
     }),
   },
 });
+
 

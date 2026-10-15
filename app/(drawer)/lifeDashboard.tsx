@@ -14,7 +14,7 @@ import {
   saveDailyMorning,
   saveDailyNight,
   setAntiLazinessEnabled,
-} from "@/lib/database";
+} from "@/lib/firestoreDatabase";
 import {
   buildIdentityMessage,
   computeLifeScores,

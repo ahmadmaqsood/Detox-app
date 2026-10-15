@@ -1,8 +1,37 @@
-export type Mode = 'home' | 'hostel';
+export type Mode = 'home' | 'hostel' | 'office' | 'travel';
 
-export type LifeArea = 'spiritual' | 'physical' | 'mental' | 'work';
+export type LifeArea = 'spiritual' | 'physical' | 'mental' | 'work' | 'walk' | 'learning' | 'cold_shower' | 'reading' | 'meditation' | 'stretching' | 'food';
 
 export type TimeBlockCategory = 'morning_routine' | 'work_block' | 'night_routine';
+
+export type HabitDifficultyTier = 'minimum' | 'standard' | 'ambitious';
+
+export interface HabitDifficultyLevels {
+  minimum?: string;
+  standard?: string;
+  ambitious?: string;
+}
+
+export type TimeSlot = 'morning' | 'afternoon' | 'evening' | 'night' | 'anytime';
+
+export type HabitLifecycleStage = 'trial' | 'building' | 'maintaining' | 'adopted' | 'archived';
+
+export interface RoutineExperiment {
+  id: string;
+  name: string;
+  habitId: number;
+  variantA: { label: string; timeSlot?: TimeSlot; difficulty?: HabitDifficultyTier };
+  variantB: { label: string; timeSlot?: TimeSlot; difficulty?: HabitDifficultyTier };
+  startDate: string;
+  durationDays: number;
+  status: 'active' | 'completed' | 'cancelled';
+  winner?: 'A' | 'B' | 'inconclusive';
+  results?: {
+    completionRateA: number;
+    completionRateB: number;
+    recommendation: string;
+  };
+}
 
 export interface HabitIcon {
   ios: string;
@@ -35,6 +64,25 @@ export interface Habit {
   createdAt: string;
   /** True if this habit is an extra task activated during Detox Protocol */
   detoxOnly?: boolean;
+
+  // ─── Adaptive Habits & Routines (System 1) ─────────────────
+  /** Elastic difficulty tier descriptions */
+  difficultyLevels?: HabitDifficultyLevels;
+  /** Preferred time-of-day slot */
+  timeSlot?: TimeSlot;
+  /** Habit stacking: Anchor habit ID or event name */
+  stackedAfterHabitId?: number;
+  stackAnchorName?: string;
+  /** Prerequisite habit IDs that must happen before this habit */
+  prerequisiteHabitIds?: number[];
+  /** Habit lifecycle stage */
+  lifecycleStage?: HabitLifecycleStage;
+  /** User-perceived usefulness rating (1 to 5 stars) */
+  usefulnessRating?: number;
+  /** Multi-factor effectiveness score (0 to 100) */
+  effectivenessScore?: number;
+  /** Soft archival flag */
+  archived?: boolean;
 }
 
 export function parseHabitIcon(raw: string): HabitIcon {
@@ -58,6 +106,7 @@ export interface DailyHabitEntry {
   completed: boolean;
   time: string | null;
   detoxOnly?: boolean;
+  completedTier?: HabitDifficultyTier;
 }
 
 export interface DailyProgressEntry {

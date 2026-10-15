@@ -1,29 +1,31 @@
 import { HabitIconView } from '@/components/HabitIconView';
 import { PlatformSymbol } from '@/components/PlatformSymbol';
 import * as Haptics from 'expo-haptics';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
-  TextInput,
+  Text,
   View,
 } from 'react-native';
 import Animated, {
   FadeIn,
   FadeInDown,
-  FadeInUp,
   useAnimatedStyle,
   useSharedValue,
-  withSpring
+  withSpring,
 } from 'react-native-reanimated';
 
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
+import { HabitEffectivenessCard } from '@/components/habits/HabitEffectivenessCard';
+import { HabitLifecycleCard } from '@/components/habits/HabitLifecycleCard';
+import { RoutineExperimentCard } from '@/components/habits/RoutineExperimentCard';
+import { RoutineExperimentModal } from '@/components/habits/RoutineExperimentModal';
 import { Body, Caption, Heading } from '@/components/Typography';
 import {
   deleteHabit,
@@ -31,32 +33,30 @@ import {
   getHabitCompletionRate,
   getHabitHistory,
   getLongestStreak,
+  getRecentDailyEntries,
+  getRoutineExperiments,
   getStreak,
-  updateHabit,
 } from "@/lib/firestoreDatabase";
-import type { Habit, HabitIcon, LifeArea, Mode } from '@/lib/types';
+import type {
+  DailyProgressEntry,
+  Habit,
+  HabitDifficultyTier,
+  LifeArea,
+  RoutineExperiment,
+  TimeSlot,
+} from '@/lib/types';
 import { parseHabitIcon } from '@/lib/types';
 import { useAppTheme } from '@/theme';
 import { radius, spacing } from '@/theme/spacing';
-import { typography } from '@/theme/typography';
-import {
-  HABIT_ICON_OPTIONS,
-  ICON_CATEGORIES,
-  type HabitIconOption,
-  type IconCategory,
-} from '@/constants/habitIcons';
 
-// ─── Color palette & catalogs ──────────────────────────────────
+// ─── Catalogs ──────────────────────────────────────────────────
 
-const COLOR_OPTIONS = [
-  '#4ADE80', '#34D399', '#22D3EE', '#60A5FA',
-  '#818CF8', '#A78BFA', '#C084FC', '#F472B6',
-  '#F87171', '#EF4444', '#F59E0B', '#FBBF24',
-];
-
-const MODE_OPTIONS: { label: string; value: Mode }[] = [
-  { label: '🏠 Home', value: 'home' },
-  { label: '🏢 Hostel', value: 'hostel' },
+const TIME_SLOT_OPTIONS: { label: string; value: TimeSlot }[] = [
+  { label: '🌅 Morning', value: 'morning' },
+  { label: '☀️ Afternoon', value: 'afternoon' },
+  { label: '🌙 Evening', value: 'evening' },
+  { label: '✨ Night', value: 'night' },
+  { label: '⚡ Anytime', value: 'anytime' },
 ];
 
 const LIFE_AREA_OPTIONS: { label: string; value: LifeArea }[] = [
@@ -64,24 +64,17 @@ const LIFE_AREA_OPTIONS: { label: string; value: LifeArea }[] = [
   { label: 'Physical', value: 'physical' },
   { label: 'Mental', value: 'mental' },
   { label: 'Work', value: 'work' },
+  { label: 'Walk', value: 'walk' },
+  { label: 'Learning', value: 'learning' },
+  { label: 'Cold Shower', value: 'cold_shower' },
+  { label: 'Reading', value: 'reading' },
+  { label: 'Meditation', value: 'meditation' },
+  { label: 'Stretching', value: 'stretching' },
+  { label: 'Food', value: 'food' },
 ];
 
 function lifeAreaLabel(area: LifeArea): string {
   return LIFE_AREA_OPTIONS.find((o) => o.value === area)?.label ?? area;
-}
-
-// ─── Helpers ───────────────────────────────────────────────────
-
-function iconIndex(icon: HabitIcon): number {
-  const idx = HABIT_ICON_OPTIONS.findIndex(
-    (o) => o.icon.android === icon.android || o.icon.ios === icon.ios
-  );
-  return idx >= 0 ? idx : 0;
-}
-
-function colorIndex(color: string): number {
-  const idx = COLOR_OPTIONS.indexOf(color);
-  return idx >= 0 ? idx : 0;
 }
 
 function formatDate(iso: string): string {
@@ -109,29 +102,16 @@ export default function HabitDetailScreen() {
   const [streak, setStreak] = useState(0);
   const [longestStreak, setLongestStreak] = useState(0);
   const [completion, setCompletion] = useState(0);
-  const [history, setHistory] = useState<{ date: string; completed: number }[]>([]);
-  const [editing, setEditing] = useState(false);
+  const [history, setHistory] = useState<{ date: string; completed: number; completedTier?: HabitDifficultyTier }[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Edit state
-  const [editName, setEditName] = useState('');
-  const [editIconIdx, setEditIconIdx] = useState(0);
-  const [editIconCategory, setEditIconCategory] = useState<IconCategory>('all');
-  const [editColorIdx, setEditColorIdx] = useState(0);
-  const [editMode, setEditMode] = useState<Mode>('hostel');
-  const [editLifeArea, setEditLifeArea] = useState<LifeArea>('mental');
-  const [editTarget, setEditTarget] = useState(1);
-  const [editDetoxOnly, setEditDetoxOnly] = useState(false);
-  const [saving, setSaving] = useState(false);
+  // Routine experiment state
+  const [experiment, setExperiment] = useState<RoutineExperiment | null>(null);
+  const [recentEntries, setRecentEntries] = useState<DailyProgressEntry[]>([]);
+  const [showExperimentModal, setShowExperimentModal] = useState(false);
+
   const [deleting, setDeleting] = useState(false);
-
-  const selectedEditOption = HABIT_ICON_OPTIONS[editIconIdx] ?? HABIT_ICON_OPTIONS[0];
-
-  const displayedEditIcons = useMemo(() => {
-    if (editIconCategory === 'all') return HABIT_ICON_OPTIONS;
-    return HABIT_ICON_OPTIONS.filter((opt) => opt.category === editIconCategory);
-  }, [editIconCategory]);
 
   const habitId = id ? Number(id) : null;
 
@@ -144,12 +124,14 @@ export default function HabitDetailScreen() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [h, s, ls, pct, hist] = await Promise.all([
+      const [h, s, ls, pct, hist, exps, entries] = await Promise.all([
         getHabitById(habitId),
         getStreak(habitId).catch(() => 0),
         getLongestStreak(habitId).catch(() => 0),
         getHabitCompletionRate(habitId).catch(() => 0),
         getHabitHistory(habitId, 30).catch(() => []),
+        getRoutineExperiments().catch(() => []),
+        getRecentDailyEntries(30).catch(() => []),
       ]);
       if (h) {
         setHabit(h);
@@ -157,15 +139,12 @@ export default function HabitDetailScreen() {
         setLongestStreak(ls);
         setCompletion(pct);
         setHistory(hist);
+        setRecentEntries(entries);
 
-        const parsedIcon = parseHabitIcon(h.icon);
-        setEditName(h.name);
-        setEditIconIdx(iconIndex(parsedIcon));
-        setEditColorIdx(colorIndex(h.color));
-        setEditMode(h.mode);
-        setEditLifeArea(h.lifeArea ?? 'mental');
-        setEditTarget(h.targetPerDay);
-        setEditDetoxOnly(Boolean(h.detoxOnly));
+        const activeOrRecent =
+          exps.find((e) => e.habitId === habitId && e.status === 'active') ??
+          exps.find((e) => e.habitId === habitId);
+        setExperiment(activeOrRecent ?? null);
       } else {
         setLoadError("Habit not found");
       }
@@ -177,33 +156,11 @@ export default function HabitDetailScreen() {
     }
   }, [habitId]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  const handleSave = async () => {
-    if (!habitId || !editName.trim() || saving) return;
-    try {
-      setSaving(true);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      await updateHabit(habitId, {
-        name: editName.trim(),
-        icon: HABIT_ICON_OPTIONS[editIconIdx].icon,
-        color: COLOR_OPTIONS[editColorIdx],
-        mode: editMode,
-        lifeArea: editLifeArea,
-        targetPerDay: editTarget,
-        detoxOnly: editDetoxOnly,
-      });
-      setEditing(false);
+  useFocusEffect(
+    useCallback(() => {
       loadData();
-    } catch (err) {
-      console.error("Failed to update habit:", err);
-      Alert.alert("Error", "Could not save changes. Please try again.");
-    } finally {
-      setSaving(false);
-    }
-  };
+    }, [loadData])
+  );
 
   const handleDelete = () => {
     if (!habitId || deleting) return;
@@ -254,430 +211,258 @@ export default function HabitDetailScreen() {
   }
 
   const parsedIcon = parseHabitIcon(habit.icon);
-  const habitColor = habit.color;
-
-  const activeIcon = editing ? HABIT_ICON_OPTIONS[editIconIdx].icon : parsedIcon;
-  const activeColor = editing ? COLOR_OPTIONS[editColorIdx] : habitColor;
-  const activeName = editing ? editName || 'Habit Name' : habit.name;
-
-  // Build 30-day grid
   const dayGrid = buildDayGrid(history);
 
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: t.background }}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
-      {/* ─── Hero Card ───────────────────────────── */}
-      <Animated.View entering={FadeIn.duration(300)}>
-        <View style={[styles.hero, { backgroundColor: t.card }]}>
-          <View style={[styles.heroIconWrap, { backgroundColor: activeColor + '22' }]}>
-            <HabitIconView icon={activeIcon} color={activeColor} size={32} />
-          </View>
-          <Heading variant="title1" style={styles.heroName}>
-            {activeName}
-          </Heading>
-          <Caption variant="footnote" color={t.textMuted}>
-            {lifeAreaLabel(editing ? editLifeArea : habit.lifeArea ?? 'mental')} ·{' '}
-            {(editing ? editMode : habit.mode)} · {editing ? editTarget : habit.targetPerDay}x daily · since{' '}
-            {formatDate(habit.createdAt)}
-          </Caption>
-          {(editing ? editDetoxOnly : habit.detoxOnly) && (
-            <View style={{ marginTop: spacing.sm, backgroundColor: '#10B98120', borderColor: '#10B98160', borderWidth: 1, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, alignSelf: 'center' }}>
-              <Caption variant="caption2" color="#10B981" style={{ fontWeight: '700' }}>
-                🛡️ Detox Protocol Task
-              </Caption>
+    <>
+      <Stack.Screen
+        options={{
+          title: habit.name,
+          headerRight: () => (
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                router.push({
+                  pathname: '/addHabit',
+                  params: { editId: String(habitId) },
+                });
+              }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              style={styles.headerEditBtn}
+            >
+              <PlatformSymbol ios="pencil" material="edit" tintColor={t.accent} size={18} />
+              <Text style={[styles.headerEditText, { color: t.accent }]}>Edit</Text>
+            </Pressable>
+          ),
+        }}
+      />
+      <ScrollView
+        style={{ flex: 1, backgroundColor: t.background }}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ─── Hero Card ───────────────────────────── */}
+        <Animated.View entering={FadeIn.duration(300)}>
+          <View style={[styles.hero, { backgroundColor: t.card }]}>
+            <View style={[styles.heroIconWrap, { backgroundColor: habit.color + '22' }]}>
+              <HabitIconView icon={parsedIcon} color={habit.color} size={32} />
             </View>
-          )}
-        </View>
-      </Animated.View>
+            <Heading variant="title1" style={styles.heroName}>
+              {habit.name}
+            </Heading>
+            <Caption variant="footnote" color={t.textMuted}>
+              {lifeAreaLabel(habit.lifeArea ?? 'mental')} · {habit.mode} · {habit.targetPerDay}x daily · since{' '}
+              {formatDate(habit.createdAt)}
+            </Caption>
 
-      {/* ─── Stats Row ───────────────────────────── */}
-      <Animated.View entering={FadeInDown.delay(100).duration(300)} style={styles.statsRow}>
-        <StatCard label="Current Streak" value={`${streak}d`} color={t.accent} t={t} />
-        <StatCard label="Best Streak" value={`${longestStreak}d`} color="#60A5FA" t={t} />
-        <StatCard label="Completion" value={`${completion}%`} color="#A78BFA" t={t} />
-      </Animated.View>
-
-      {/* ─── Completion Ring ─────────────────────── */}
-      <Animated.View entering={FadeInDown.delay(150).duration(300)}>
-        <CompletionBar percentage={completion} color={activeColor} t={t} />
-      </Animated.View>
-
-      {/* ─── 30-Day Grid ─────────────────────────── */}
-      <Animated.View entering={FadeInDown.delay(200).duration(300)}>
-        <Card>
-          <Body variant="headline" style={styles.sectionTitle}>
-            Last 30 Days
-          </Body>
-          <View style={styles.dayGrid}>
-            {dayGrid.map((day) => (
-              <View
-                key={day.date}
-                style={[
-                  styles.dayCell,
-                  {
-                    backgroundColor: day.completed
-                      ? activeColor
-                      : day.isToday
-                        ? t.border
-                        : t.background,
-                    opacity: day.completed ? 1 : day.isToday ? 0.8 : 0.35,
-                  },
-                ]}
-              />
-            ))}
-          </View>
-          <View style={styles.gridLegend}>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: activeColor }]} />
-              <Caption variant="caption2" color={t.textMuted}>Done</Caption>
-            </View>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: t.border }]} />
-              <Caption variant="caption2" color={t.textMuted}>Missed</Caption>
-            </View>
-          </View>
-        </Card>
-      </Animated.View>
-
-      {/* ─── History Log ─────────────────────────── */}
-      <Animated.View entering={FadeInDown.delay(250).duration(300)}>
-        <Card>
-          <Body variant="headline" style={styles.sectionTitle}>
-            Daily Log
-          </Body>
-          {history.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Caption color={t.textMuted}>
-                No history yet. Complete this habit to see your logs here.
-              </Caption>
-            </View>
-          ) : (
-            <View style={styles.logList}>
-              {history.slice(0, 14).map((entry) => (
-                <View key={entry.date} style={[styles.logRow, { borderBottomColor: t.border }]}>
-                  <View style={styles.logLeft}>
-                    <View
-                      style={[
-                        styles.logDot,
-                        { backgroundColor: entry.completed ? activeColor : t.danger },
-                      ]}
-                    />
-                    <Body variant="subhead">{dayLabel(entry.date)}</Body>
-                  </View>
-                  <View
-                    style={[
-                      styles.logBadge,
-                      {
-                        backgroundColor: entry.completed
-                          ? activeColor + '18'
-                          : t.dangerMuted,
-                      },
-                    ]}
-                  >
-                    <Caption
-                      variant="caption2"
-                      color={entry.completed ? activeColor : t.danger}
-                      style={{ fontWeight: '600' }}
-                    >
-                      {entry.completed ? 'Done' : 'Missed'}
-                    </Caption>
-                  </View>
+            {/* Adaptive badges */}
+            <View style={styles.heroBadgesRow}>
+              {habit.timeSlot && (
+                <View style={[styles.heroBadge, { backgroundColor: t.background }]}>
+                  <Caption variant="caption2" color={t.textSecondary} style={{ fontWeight: '600' }}>
+                    {TIME_SLOT_OPTIONS.find((s) => s.value === habit.timeSlot)?.label ?? 'Anytime'}
+                  </Caption>
                 </View>
-              ))}
+              )}
+              {habit.stackAnchorName ? (
+                <View style={[styles.heroBadge, { backgroundColor: '#D4FE3315', borderColor: '#D4FE3350', borderWidth: 1 }]}>
+                  <Caption variant="caption2" color="#D4FE33" style={{ fontWeight: '700' }}>
+                    🔗 After {habit.stackAnchorName}
+                  </Caption>
+                </View>
+              ) : null}
+              {habit.detoxOnly ? (
+                <View style={[styles.heroBadge, { backgroundColor: '#10B98120', borderColor: '#10B98160', borderWidth: 1 }]}>
+                  <Caption variant="caption2" color="#10B981" style={{ fontWeight: '700' }}>
+                    🛡️ Detox Protocol Task
+                  </Caption>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Elastic tiers overview */}
+            {habit.difficultyLevels && (habit.difficultyLevels.minimum || habit.difficultyLevels.standard || habit.difficultyLevels.ambitious) && (
+              <View style={[styles.heroElasticBox, { backgroundColor: t.background, borderColor: t.borderLight }]}>
+                {habit.difficultyLevels.minimum && (
+                  <View style={styles.heroElasticItem}>
+                    <Text style={[styles.heroElasticTag, { color: '#D4FE33' }]}>MIN</Text>
+                    <Text style={[styles.heroElasticVal, { color: t.textSecondary }]} numberOfLines={1}>{habit.difficultyLevels.minimum}</Text>
+                  </View>
+                )}
+                {habit.difficultyLevels.standard && (
+                  <View style={styles.heroElasticItem}>
+                    <Text style={[styles.heroElasticTag, { color: t.accent }]}>STD</Text>
+                    <Text style={[styles.heroElasticVal, { color: t.textSecondary }]} numberOfLines={1}>{habit.difficultyLevels.standard}</Text>
+                  </View>
+                )}
+                {habit.difficultyLevels.ambitious && (
+                  <View style={styles.heroElasticItem}>
+                    <Text style={[styles.heroElasticTag, { color: '#FBBF24' }]}>AMB</Text>
+                    <Text style={[styles.heroElasticVal, { color: t.textSecondary }]} numberOfLines={1}>{habit.difficultyLevels.ambitious}</Text>
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+        </Animated.View>
+
+        {/* ─── Stats Row ───────────────────────────── */}
+        <Animated.View entering={FadeInDown.delay(100).duration(300)} style={styles.statsRow}>
+          <StatCard label="Current Streak" value={`${streak}d`} color={t.accent} t={t} />
+          <StatCard label="Best Streak" value={`${longestStreak}d`} color="#60A5FA" t={t} />
+          <StatCard label="Completion" value={`${completion}%`} color="#A78BFA" t={t} />
+        </Animated.View>
+
+        {/* ─── Completion Ring ─────────────────────── */}
+        <Animated.View entering={FadeInDown.delay(150).duration(300)}>
+          <CompletionBar percentage={completion} color={habit.color} t={t} />
+        </Animated.View>
+
+        {/* ─── Habit Effectiveness Score & Intelligence ─── */}
+        <Animated.View entering={FadeInDown.delay(175).duration(300)}>
+          <HabitEffectivenessCard
+            habit={habit}
+            completionRate={completion}
+            history={history}
+            onHabitUpdated={loadData}
+          />
+        </Animated.View>
+
+        {/* ─── Habit Lifecycle Progress ─── */}
+        <Animated.View entering={FadeInDown.delay(190).duration(300)}>
+          <HabitLifecycleCard
+            habit={habit}
+            streak={streak}
+            onHabitArchived={() => router.back()}
+          />
+        </Animated.View>
+
+        {/* ─── Routine Experiment (A/B Test) ─── */}
+        <Animated.View entering={FadeInDown.delay(195).duration(300)}>
+          {experiment ? (
+            <RoutineExperimentCard
+              experiment={experiment}
+              entries={recentEntries}
+              habit={habit}
+              onExperimentUpdated={loadData}
+            />
+          ) : (
+            <View style={[styles.experimentPromoCard, { backgroundColor: t.card, borderColor: t.borderLight }]}>
+              <View style={styles.experimentPromoHeader}>
+                <View style={styles.experimentIconWrap}>
+                  <PlatformSymbol ios="flask.fill" material="science" tintColor="#D4FE33" size={18} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Caption variant="caption2" color={t.textMuted} style={styles.kicker}>
+                    ROUTINE OPTIMIZATION
+                  </Caption>
+                  <Heading variant="title3">A/B Routine Experiment</Heading>
+                </View>
+              </View>
+              <Caption variant="caption1" color={t.textSecondary}>
+                Compare morning vs evening or micro vs standard targets for 14 days on alternating days to find what works best.
+              </Caption>
+              <Button
+                title="Start Routine Experiment"
+                variant="secondary"
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setShowExperimentModal(true);
+                }}
+              />
             </View>
           )}
-        </Card>
-      </Animated.View>
+        </Animated.View>
 
-      {/* ─── Edit Section ────────────────────────── */}
-      {editing ? (
-        <Animated.View entering={FadeInUp.duration(300)}>
+        {/* ─── 30-Day Grid ─────────────────────────── */}
+        <Animated.View entering={FadeInDown.delay(200).duration(300)}>
           <Card>
             <Body variant="headline" style={styles.sectionTitle}>
-              Edit Habit
+              Last 30 Days
             </Body>
-
-            {/* Name */}
-            <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                NAME
-              </Caption>
-              <TextInput
-                style={[styles.editInput, { backgroundColor: t.background, color: t.textPrimary, borderColor: t.border }]}
-                value={editName}
-                onChangeText={setEditName}
-                placeholderTextColor={t.textMuted}
-                selectionColor={t.accent}
-              />
+            <View style={styles.dayGrid}>
+              {dayGrid.map((day) => (
+                <View
+                  key={day.date}
+                  style={[
+                    styles.dayCell,
+                    {
+                      backgroundColor: day.completed
+                        ? habit.color
+                        : day.isToday
+                          ? t.border
+                          : t.background,
+                      opacity: day.completed ? 1 : day.isToday ? 0.8 : 0.35,
+                    },
+                  ]}
+                />
+              ))}
             </View>
+            <View style={styles.gridLegend}>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: habit.color }]} />
+                <Caption variant="caption2" color={t.textMuted}>Done</Caption>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: t.border }]} />
+                <Caption variant="caption2" color={t.textMuted}>Missed</Caption>
+              </View>
+            </View>
+          </Card>
+        </Animated.View>
 
-            {/* Icon picker */}
-            <View style={styles.editField}>
-              <View style={styles.sectionHeaderRow}>
-                <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                  ICON
-                </Caption>
-                <Caption variant="caption1" color={COLOR_OPTIONS[editColorIdx]} style={styles.iconSelectedBadge}>
-                  {selectedEditOption.label}
+        {/* ─── History Log ─────────────────────────── */}
+        <Animated.View entering={FadeInDown.delay(250).duration(300)}>
+          <Card>
+            <Body variant="headline" style={styles.sectionTitle}>
+              Daily Log
+            </Body>
+            {history.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Caption color={t.textMuted}>
+                  No history yet. Complete this habit to see your logs here.
                 </Caption>
               </View>
-
-              {/* Category Filter Chips */}
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.categoryScroll}
-              >
-                {ICON_CATEGORIES.map((cat) => {
-                  const active = editIconCategory === cat.id;
-                  return (
-                    <Pressable
-                      key={cat.id}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditIconCategory(cat.id);
-                      }}
+            ) : (
+              <View style={styles.logList}>
+                {history.slice(0, 14).map((entry) => (
+                  <View key={entry.date} style={[styles.logRow, { borderBottomColor: t.border }]}>
+                    <View style={styles.logLeft}>
+                      <View
+                        style={[
+                          styles.logDot,
+                          { backgroundColor: entry.completed ? habit.color : t.danger },
+                        ]}
+                      />
+                      <Body variant="subhead">{dayLabel(entry.date)}</Body>
+                    </View>
+                    <View
                       style={[
-                        styles.categoryChip,
+                        styles.logBadge,
                         {
-                          backgroundColor: active ? COLOR_OPTIONS[editColorIdx] : t.card,
-                          borderColor: active ? COLOR_OPTIONS[editColorIdx] : t.border,
+                          backgroundColor: entry.completed
+                            ? habit.color + '18'
+                            : t.dangerMuted,
                         },
                       ]}
                     >
                       <Caption
                         variant="caption2"
-                        color={active ? '#FFFFFF' : t.textSecondary}
-                        style={active && { fontWeight: '700' }}
+                        color={entry.completed ? habit.color : t.danger}
+                        style={{ fontWeight: '600' }}
                       >
-                        {cat.label}
+                        {entry.completed ? 'Done' : 'Missed'}
                       </Caption>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-
-              <View style={styles.iconGrid}>
-                {displayedEditIcons.map((opt) => {
-                  const globalIdx = HABIT_ICON_OPTIONS.findIndex((o) => o === opt);
-                  const active = globalIdx === editIconIdx;
-                  return (
-                    <Pressable
-                      key={opt.label}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditIconIdx(globalIdx);
-                      }}
-                      style={[
-                        styles.iconCell,
-                        { backgroundColor: active ? COLOR_OPTIONS[editColorIdx] + '22' : t.background },
-                        active && { borderColor: COLOR_OPTIONS[editColorIdx], borderWidth: 1.5 },
-                      ]}
-                    >
-                      <HabitIconView
-                        icon={opt.icon}
-                        color={active ? COLOR_OPTIONS[editColorIdx] : t.textMuted}
-                        size={20}
-                      />
-                    </Pressable>
-                  );
-                })}
+                    </View>
+                  </View>
+                ))}
               </View>
-            </View>
-
-            {/* Color picker */}
-            <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                COLOR
-              </Caption>
-              <View style={styles.colorRow}>
-                {COLOR_OPTIONS.map((c, i) => {
-                  const active = i === editColorIdx;
-                  return (
-                    <Pressable
-                      key={c}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditColorIdx(i);
-                      }}
-                      style={[
-                        styles.colorDot,
-                        { backgroundColor: c },
-                        active && styles.colorDotActive,
-                      ]}
-                    >
-                      {active && (
-                        <PlatformSymbol ios="checkmark" material="check" tintColor="#fff" size={12} />
-                      )}
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* Mode */}
-            <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                MODE
-              </Caption>
-              <View style={styles.modeRow}>
-                {MODE_OPTIONS.map((opt) => {
-                  const active = opt.value === editMode;
-                  return (
-                    <Pressable
-                      key={opt.value}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditMode(opt.value);
-                      }}
-                      style={[
-                        styles.modeChip,
-                        { backgroundColor: active ? t.accent + '18' : t.background },
-                        active && { borderColor: t.accent, borderWidth: 1.5 },
-                      ]}
-                    >
-                      <Body
-                        variant="subhead"
-                        color={active ? t.accent : t.textSecondary}
-                        style={{ fontWeight: active ? '600' : '400' }}
-                      >
-                        {opt.label}
-                      </Body>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* Life area */}
-            <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                LIFE AREA
-              </Caption>
-              <View style={styles.modeRow}>
-                {LIFE_AREA_OPTIONS.map((opt) => {
-                  const active = opt.value === editLifeArea;
-                  return (
-                    <Pressable
-                      key={opt.value}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setEditLifeArea(opt.value);
-                      }}
-                      style={[
-                        styles.modeChip,
-                        { backgroundColor: active ? t.accent + '18' : t.background },
-                        active && { borderColor: t.accent, borderWidth: 1.5 },
-                      ]}
-                    >
-                      <Body
-                        variant="subhead"
-                        color={active ? t.accent : t.textSecondary}
-                        style={{ fontWeight: active ? '600' : '400' }}
-                      >
-                        {opt.label}
-                      </Body>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* Target stepper */}
-            <View style={styles.editField}>
-              <Caption variant="footnote" color={t.textSecondary} style={styles.editLabel}>
-                TARGET PER DAY
-              </Caption>
-              <View style={[styles.stepperRow, { backgroundColor: t.background }]}>
-                <Pressable
-                  onPress={() => {
-                    if (editTarget > 1) {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      setEditTarget((v) => v - 1);
-                    }
-                  }}
-                  style={[styles.stepperBtn, { opacity: editTarget <= 1 ? 0.3 : 1 }]}
-                >
-                  <PlatformSymbol ios="minus" material="remove" tintColor={t.textPrimary} size={16} />
-                </Pressable>
-                <View style={styles.stepperValue}>
-                  <Heading variant="title3">{editTarget}</Heading>
-                </View>
-                <Pressable
-                  onPress={() => {
-                    if (editTarget < 20) {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      setEditTarget((v) => v + 1);
-                    }
-                  }}
-                  style={[styles.stepperBtn, { opacity: editTarget >= 20 ? 0.3 : 1 }]}
-                >
-                  <PlatformSymbol ios="plus" material="add" tintColor={t.textPrimary} size={16} />
-                </Pressable>
-              </View>
-            </View>
-
-            {/* ─── Detox Protocol Task ──────────────── */}
-            <View style={styles.editField}>
-              <View style={[styles.switchCard, { backgroundColor: t.background }]}>
-                <View style={{ flex: 1, paddingRight: spacing.md }}>
-                  <Heading variant="title3">🛡️ Detox Protocol Task</Heading>
-                  <Caption variant="caption2" color={t.textMuted} style={{ marginTop: spacing.xxs }}>
-                    When enabled, this habit only activates during Detox Mode days.
-                  </Caption>
-                </View>
-                <Switch
-                  value={editDetoxOnly}
-                  onValueChange={(val) => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    setEditDetoxOnly(val);
-                  }}
-                  trackColor={{ false: t.border, true: t.accent }}
-                  thumbColor="#FFFFFF"
-                />
-              </View>
-            </View>
-
-            <View style={styles.editActions}>
-              <Button
-                title="Save Changes"
-                onPress={handleSave}
-                disabled={!editName.trim() || saving}
-                loading={saving}
-              />
-              <Button
-                title="Cancel"
-                variant="secondary"
-                disabled={saving}
-                onPress={() => {
-                  if (habit) {
-                    const parsedIcon = parseHabitIcon(habit.icon);
-                    setEditName(habit.name);
-                    setEditIconIdx(iconIndex(parsedIcon));
-                    setEditColorIdx(colorIndex(habit.color));
-                    setEditMode(habit.mode);
-                    setEditLifeArea(habit.lifeArea ?? 'mental');
-                    setEditTarget(habit.targetPerDay);
-                    setEditDetoxOnly(Boolean(habit.detoxOnly));
-                  }
-                  setEditing(false);
-                }}
-              />
-            </View>
+            )}
           </Card>
         </Animated.View>
-      ) : (
+
+        {/* ─── Actions ─────────────────────────────── */}
         <Animated.View entering={FadeInDown.delay(300).duration(300)} style={styles.actionButtons}>
-          <Button
-            title="Edit Habit"
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              setEditing(true);
-            }}
-          />
           <Pressable onPress={handleDelete} style={[styles.deleteBtn, deleting && { opacity: 0.5 }]} disabled={deleting}>
             <PlatformSymbol ios="trash.fill" material="delete" tintColor={t.danger} size={16} />
             <Body variant="subhead" color={t.danger}>
@@ -685,8 +470,17 @@ export default function HabitDetailScreen() {
             </Body>
           </Pressable>
         </Animated.View>
+      </ScrollView>
+
+      {habit && (
+        <RoutineExperimentModal
+          visible={showExperimentModal}
+          onClose={() => setShowExperimentModal(false)}
+          habit={habit}
+          onExperimentStarted={loadData}
+        />
       )}
-    </ScrollView>
+    </>
   );
 }
 
@@ -752,22 +546,27 @@ function CompletionBar({
 // ─── 30-day grid builder ───────────────────────────────────────
 
 function buildDayGrid(
-  history: { date: string; completed: number }[]
-): { date: string; completed: boolean; isToday: boolean }[] {
-  const completedSet = new Set(
-    history.filter((h) => h.completed === 1).map((h) => h.date)
-  );
+  history: { date: string; completed: number; completedTier?: HabitDifficultyTier }[]
+): { date: string; completed: boolean; completedTier?: HabitDifficultyTier; isToday: boolean }[] {
+  const completedMap = new Map<string, { completed: boolean; completedTier?: HabitDifficultyTier }>();
+  history.forEach((h) => {
+    if (h.completed === 1) {
+      completedMap.set(h.date, { completed: true, completedTier: h.completedTier });
+    }
+  });
   const today = new Date();
   const todayISO = today.toISOString().slice(0, 10);
-  const grid: { date: string; completed: boolean; isToday: boolean }[] = [];
+  const grid: { date: string; completed: boolean; completedTier?: HabitDifficultyTier; isToday: boolean }[] = [];
 
   for (let i = 29; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const iso = d.toISOString().slice(0, 10);
+    const entry = completedMap.get(iso);
     grid.push({
       date: iso,
-      completed: completedSet.has(iso),
+      completed: !!entry?.completed,
+      completedTier: entry?.completedTier,
       isToday: iso === todayISO,
     });
   }
@@ -905,105 +704,17 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
   },
 
-  // Edit
-  editField: {
-    gap: spacing.sm,
-    marginBottom: spacing.lg,
+  // Header edit
+  headerEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  editLabel: {
+  headerEditText: {
+    fontSize: 16,
     fontWeight: '600',
-    letterSpacing: 0.8,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  iconSelectedBadge: {
-    fontWeight: '700',
-  },
-  categoryScroll: {
-    gap: spacing.xs,
-    paddingVertical: spacing.xxs,
-  },
-  categoryChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    borderRadius: radius.full,
-    borderWidth: 1,
-  },
-  editInput: {
-    borderWidth: 1,
-    borderRadius: radius.md,
-    padding: spacing.lg,
-    ...typography.body,
-  },
-  iconGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  iconCell: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  colorRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
-  },
-  colorDot: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  colorDotActive: {
-    borderWidth: 3,
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  modeRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  modeChip: {
-    flex: 1,
-    paddingVertical: spacing.md,
-    borderRadius: radius.md,
-    alignItems: 'center',
-  },
-  stepperRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: radius.lg,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.lg,
-  },
-  stepperBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepperValue: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  switchCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: spacing.md,
-    borderRadius: radius.md,
-  },
-  editActions: {
-    gap: spacing.md,
-    marginTop: spacing.sm,
   },
 
   // Action buttons
@@ -1016,5 +727,66 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     paddingVertical: spacing.md,
+  },
+
+  // Adaptive Hero Badges
+  heroBadgesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    justifyContent: 'center',
+    marginTop: spacing.xs,
+  },
+  heroBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  heroElasticBox: {
+    width: '100%',
+    marginTop: spacing.sm,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    gap: 6,
+  },
+  heroElasticItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  heroElasticTag: {
+    fontSize: 9,
+    fontWeight: '800',
+    width: 28,
+  },
+  heroElasticVal: {
+    fontSize: 12,
+    flex: 1,
+  },
+
+  // Experiment Promo Card
+  experimentPromoCard: {
+    borderRadius: radius['2xl'],
+    padding: spacing.lg,
+    borderWidth: 1,
+    gap: spacing.md,
+  },
+  experimentPromoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  experimentIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#D4FE3320',
+  },
+  kicker: {
+    fontWeight: '700',
+    letterSpacing: 1,
   },
 });

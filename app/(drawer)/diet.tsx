@@ -2,9 +2,9 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { Body, Caption, Heading } from "@/components/Typography";
+import { buildDietInsights } from "@/lib/dietInsights";
 import {
   addDietMeal,
-  buildDietInsights,
   deleteDietMeal,
   getBodyWeights,
   getDietMealsForDate,
@@ -12,7 +12,7 @@ import {
   getDietRules,
   getExerciseMinutesByDay,
   setDietRules,
-} from "@/lib";
+} from "@/lib/firestoreDatabase";
 import type { DietMeal, MealQuality } from "@/lib/types";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";

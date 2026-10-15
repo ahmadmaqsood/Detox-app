@@ -3,6 +3,7 @@ import { defaultHabits } from "@/lib/seed";
 import { MASTER_ACHIEVEMENTS, MASTER_CHALLENGES } from "@/lib/seed/masterCatalog";
 import type {
   AchievementDefinition,
+  BodyWeightEntry,
   Challenge,
   ChallengeCategory,
   ChallengeCompletionRecord,
@@ -15,20 +16,35 @@ import type {
   DailyHabitEntry,
   DailyInterventionDoc,
   DailyProgressEntry,
+  DailyReset,
   DeepWorkCategory,
   DeepWorkSession,
   DeepWorkTask,
   DeepWorkTaskType,
+  DietMeal,
+  DietRules,
   EnergyLevel,
+  ExerciseEntry,
   Habit,
+  HabitDifficultyLevels,
+  HabitDifficultyTier,
   HabitIcon,
+  HabitLifecycleStage,
   LifeArea,
+  MealQuality,
   Metrics,
   Mode,
   MoodState,
   RecoveryActionEntry,
   RelapseEvent,
-  UnlockedAchievementItem
+  RoutineExperiment,
+  SpiritualCadence,
+  SpiritualChallengeDashboard,
+  TimeBlock,
+  TimeBlockCategory,
+  TimeSlot,
+  UnlockedAchievementItem,
+  UrgeLog
 } from "@/lib/types";
 import {
   collection,
@@ -80,7 +96,7 @@ async function forEachDocInBatches(
   }
 }
 
-async function requireUid(): Promise<string> {
+export async function requireUid(): Promise<string> {
   if (!isFirebaseConfigured()) {
     throw new Error("Firebase not configured. Check app.json expo.extra.firebase.webConfig.");
   }
@@ -107,6 +123,14 @@ function userRoot(uid: string) {
     deepWorkTasks: collection(db, "users", uid, "deep_work_tasks"),
     deepWorkSessions: collection(db, "users", uid, "deep_work_sessions"),
     coachDailyChats: collection(db, "users", uid, "coach_daily_chats"),
+    spiritual: collection(db, "users", uid, "spiritual"),
+    timeBlocks: collection(db, "users", uid, "time_blocks"),
+    timeBlockLogs: collection(db, "users", uid, "time_block_logs"),
+    bodyWeights: collection(db, "users", uid, "body_weights"),
+    bodyExercise: collection(db, "users", uid, "body_exercise"),
+    dietMeals: collection(db, "users", uid, "diet_meals"),
+    urgeLogs: collection(db, "users", uid, "urge_logs"),
+    dailyReset: collection(db, "users", uid, "daily_reset"),
   };
 }
 
@@ -333,6 +357,10 @@ export async function initDB(): Promise<void> {
   import("@/lib/firestoreAchievements")
     .then((m) => m.syncFirestoreAchievements())
     .catch(() => { });
+  // Sync background steps from hardware pedometer sensor
+  import("@/lib/pedometerService")
+    .then((m) => m.syncPedometerSensorSteps())
+    .catch(() => { });
 }
 
 export async function recordLastActiveNow(): Promise<void> {
@@ -553,28 +581,7 @@ export async function setHardMode(enabled: boolean): Promise<void> {
 }
 
 export async function getHardModeStreak(): Promise<number> {
-  const uid = await requireUid();
-  const { db } = userRoot(uid);
-  const habitsSnap = await getDocs(query(collection(db, "users", uid, "habits")));
-  const habitCount = habitsSnap.docs.filter((d) => (d.data() as any)?.deleted !== true).length;
-  if (habitCount === 0) return 0;
-
-  let streak = 0;
-  const cursor = new Date();
-  cursor.setHours(0, 0, 0, 0);
-  while (true) {
-    const day = cursor.toISOString().slice(0, 10);
-    const dayDoc = await getDoc(doc(db, "users", uid, "entries", day));
-    if (!dayDoc.exists()) break;
-    const data = dayDoc.data() as any;
-    const rate = typeof data.completionPercentage === "number"
-      ? data.completionPercentage / 100
-      : (data.completedCount ?? 0) / habitCount;
-    if (rate < 0.5) break;
-    streak++;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return streak;
+  return getOverallStreak();
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -586,6 +593,7 @@ interface HabitCacheState {
   todayHabits: Map<string, (Habit & { completed: number })[]>;
   todayEntry: DailyProgressEntry | null;
   modeStreaks: Map<Mode, number>;
+  overallStreak: number | null;
   lastFetchedAt: number;
 }
 
@@ -594,6 +602,7 @@ const habitCache: HabitCacheState = {
   todayHabits: new Map(),
   todayEntry: null,
   modeStreaks: new Map(),
+  overallStreak: null,
   lastFetchedAt: 0,
 };
 
@@ -602,6 +611,7 @@ export function invalidateHabitsCache(): void {
   habitCache.todayHabits.clear();
   habitCache.todayEntry = null;
   habitCache.modeStreaks.clear();
+  habitCache.overallStreak = null;
   habitCache.lastFetchedAt = 0;
 }
 
@@ -614,6 +624,13 @@ export async function addHabit(
     targetPerDay?: number;
     sortOrder?: number;
     detoxOnly?: boolean;
+    difficultyLevels?: HabitDifficultyLevels;
+    timeSlot?: TimeSlot;
+    stackedAfterHabitId?: number;
+    stackAnchorName?: string;
+    prerequisiteHabitIds?: number[];
+    lifecycleStage?: HabitLifecycleStage;
+    usefulnessRating?: number;
   },
 ): Promise<number> {
   const uid = await requireUid();
@@ -640,7 +657,7 @@ export async function addHabit(
     }
   }
 
-  await setDoc(doc(db, "users", uid, "habits", String(id)), {
+  const docPayload: any = {
     id,
     name: habit.name,
     icon: iconStr,
@@ -651,7 +668,16 @@ export async function addHabit(
     sortOrder,
     detoxOnly: Boolean(habit.detoxOnly),
     createdAt: todayISO(),
-  });
+    lifecycleStage: habit.lifecycleStage ?? "building",
+  };
+  if (habit.difficultyLevels) docPayload.difficultyLevels = habit.difficultyLevels;
+  if (habit.timeSlot) docPayload.timeSlot = habit.timeSlot;
+  if (habit.stackedAfterHabitId != null) docPayload.stackedAfterHabitId = habit.stackedAfterHabitId;
+  if (habit.stackAnchorName) docPayload.stackAnchorName = habit.stackAnchorName;
+  if (habit.prerequisiteHabitIds?.length) docPayload.prerequisiteHabitIds = habit.prerequisiteHabitIds;
+  if (habit.usefulnessRating != null) docPayload.usefulnessRating = habit.usefulnessRating;
+
+  await setDoc(doc(db, "users", uid, "habits", String(id)), docPayload);
   invalidateHabitsCache();
   return id;
 }
@@ -671,14 +697,22 @@ export async function reorderHabits(orderedHabitIds: number[]): Promise<void> {
   invalidateHabitsCache();
 }
 
-export async function getAllHabits(mode?: Mode, forceRefresh = false): Promise<Habit[]> {
+export async function getAllHabits(
+  mode?: Mode,
+  forceRefresh = false,
+  includeArchived = false,
+): Promise<Habit[]> {
   const uid = await requireUid();
   const now = Date.now();
   if (!forceRefresh && habitCache.allHabits && now - habitCache.lastFetchedAt < 60000) {
-    if (mode) {
-      return habitCache.allHabits.filter((h) => h.mode === mode);
+    let cached = habitCache.allHabits;
+    if (!includeArchived) {
+      cached = cached.filter((h) => !h.archived);
     }
-    return habitCache.allHabits;
+    if (mode) {
+      return cached.filter((h) => h.mode === mode);
+    }
+    return cached;
   }
 
   await ensureSeeded(uid);
@@ -693,7 +727,7 @@ export async function getAllHabits(mode?: Mode, forceRefresh = false): Promise<H
   );
   const active = snap.docs
     .map((d) => d.data() as Habit & { deleted?: boolean })
-    .filter((h) => h?.deleted !== true) as Habit[];
+    .filter((h) => h?.deleted !== true && (includeArchived || !h?.archived)) as Habit[];
 
   habitCache.allHabits = active;
   habitCache.lastFetchedAt = Date.now();
@@ -711,20 +745,60 @@ export async function getHabitById(id: number): Promise<Habit | null> {
   return snap.exists() ? (snap.data() as Habit) : null;
 }
 
+/**
+ * Strips all keys whose values are `undefined` recursively,
+ * ensuring Firestore setDoc/updateDoc never fails on "Unsupported field value: undefined".
+ */
+export function sanitizeFirestoreData<T>(data: T): T {
+  if (data === null || data === undefined) return data;
+  if (Array.isArray(data)) {
+    return data.map(sanitizeFirestoreData) as unknown as T;
+  }
+  if (typeof data === "object" && !(data instanceof Timestamp) && !(data instanceof Date)) {
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined) {
+        cleaned[key] = sanitizeFirestoreData(value);
+      }
+    }
+    return cleaned;
+  }
+  return data;
+}
+
 export async function updateHabit(
   id: number,
   updates: Partial<
-    Pick<Habit, "name" | "color" | "mode" | "targetPerDay" | "lifeArea" | "sortOrder" | "detoxOnly"> & {
+    Pick<
+      Habit,
+      | "name"
+      | "color"
+      | "mode"
+      | "targetPerDay"
+      | "lifeArea"
+      | "sortOrder"
+      | "detoxOnly"
+      | "difficultyLevels"
+      | "timeSlot"
+      | "stackedAfterHabitId"
+      | "stackAnchorName"
+      | "prerequisiteHabitIds"
+      | "lifecycleStage"
+      | "usefulnessRating"
+      | "effectivenessScore"
+      | "archived"
+    > & {
       icon: string | HabitIcon;
     }
   >,
 ): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
-  const patch: any = { ...updates, updatedAt: serverTimestamp() };
+  const rawPatch: any = { ...updates, updatedAt: serverTimestamp() };
   if (updates.icon && typeof updates.icon === "object") {
-    patch.icon = JSON.stringify(updates.icon);
+    rawPatch.icon = JSON.stringify(updates.icon);
   }
+  const patch = sanitizeFirestoreData(rawPatch);
   await setDoc(doc(db, "users", uid, "habits", String(id)), patch, { merge: true });
   invalidateHabitsCache();
 }
@@ -774,18 +848,20 @@ export async function getTodayHabits(
   mode?: Mode,
   isDetox = false,
   forceRefresh = false,
-): Promise<(Habit & { completed: number })[]> {
+  targetDate?: string,
+): Promise<(Habit & { completed: number; completedTier?: HabitDifficultyTier })[]> {
   const uid = await requireUid();
-  const cacheKey = `${mode ?? "all"}_detox_${isDetox ? "1" : "0"}`;
+  const day = targetDate ?? todayISO();
+  const isToday = day === todayISO();
+  const cacheKey = `${mode ?? "all"}_detox_${isDetox ? "1" : "0"}_${day}`;
   const now = Date.now();
 
-  if (!forceRefresh && habitCache.todayHabits.has(cacheKey) && now - habitCache.lastFetchedAt < 60000) {
+  if (!forceRefresh && isToday && habitCache.todayHabits.has(cacheKey) && now - habitCache.lastFetchedAt < 60000) {
     return habitCache.todayHabits.get(cacheKey)!;
   }
 
   await ensureSeeded(uid);
   const { db } = userRoot(uid);
-  const day = todayISO();
 
   const habitsQ = mode
     ? query(
@@ -808,7 +884,7 @@ export async function getTodayHabits(
 
   const rawHabits = habitsSnap.docs
     .map((d) => d.data() as any)
-    .filter((h) => h?.deleted !== true) as Habit[];
+    .filter((h) => h?.deleted !== true && !h?.archived) as Habit[];
 
   // When Detox is OFF: hide detoxOnly tasks (they only activate during Detox).
   // When Detox is ON: show ALL mode habits PLUS any detoxOnly tasks!
@@ -820,29 +896,45 @@ export async function getTodayHabits(
   });
 
   const dayData = dayDoc.exists() ? (dayDoc.data() as any) : null;
-  if (dayData) {
+  if (dayData && isToday) {
     habitCache.todayEntry = dayData as DailyProgressEntry;
   }
 
-  const dayHabitsMap = new Map<number, boolean>();
+  const dayHabitsMap = new Map<number, { completed: boolean; completedTier?: HabitDifficultyTier }>();
   if (Array.isArray(dayData?.habits)) {
     for (const h of dayData.habits) {
-      if (h?.id != null) dayHabitsMap.set(Number(h.id), Boolean(h.completed));
+      if (h?.id != null) {
+        dayHabitsMap.set(Number(h.id), {
+          completed: Boolean(h.completed),
+          completedTier: h.completedTier,
+        });
+      }
     }
   }
 
-  const entries = habits.map((h) => ({
-    ...h,
-    completed: dayHabitsMap.get(h.id) ? 1 : 0,
-  }));
+  const entries = habits.map((h) => {
+    const record = dayHabitsMap.get(h.id);
+    return {
+      ...h,
+      completed: record?.completed ? 1 : 0,
+      completedTier: record?.completedTier,
+    };
+  });
 
-  habitCache.todayHabits.set(cacheKey, entries);
-  habitCache.lastFetchedAt = Date.now();
+  if (isToday) {
+    habitCache.todayHabits.set(cacheKey, entries);
+    habitCache.lastFetchedAt = Date.now();
+  }
 
   return entries;
 }
 
-export async function toggleHabit(habitId: number, targetDate?: string, activeMode?: Mode): Promise<boolean> {
+export async function toggleHabit(
+  habitId: number,
+  targetDate?: string,
+  activeMode?: Mode,
+  tier?: HabitDifficultyTier,
+): Promise<boolean> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const day = targetDate ?? todayISO();
@@ -882,12 +974,14 @@ export async function toggleHabit(habitId: number, targetDate?: string, activeMo
   const existingMap = new Map<number, {
     completed: boolean;
     time?: string | null;
+    completedTier?: HabitDifficultyTier;
   }>();
   for (const eh of existingHabitsList) {
     if (eh?.id != null) {
       existingMap.set(Number(eh.id), {
         completed: Boolean(eh.completed),
         time: eh.time ?? null,
+        completedTier: eh.completedTier,
       });
     }
   }
@@ -905,6 +999,7 @@ export async function toggleHabit(habitId: number, targetDate?: string, activeMo
         name: h.name ?? habitName,
         completed: nextCompleted,
         time: nextCompleted ? toggledAt : null,
+        completedTier: nextCompleted ? (tier ?? currentEntry?.completedTier ?? "standard") : undefined,
       };
     }
     const existing = existingMap.get(hid);
@@ -913,6 +1008,7 @@ export async function toggleHabit(habitId: number, targetDate?: string, activeMo
       name: h.name ?? `Habit #${hid}`,
       completed: existing?.completed ?? false,
       time: existing?.time ?? null,
+      completedTier: existing?.completedTier,
     };
   });
 
@@ -962,6 +1058,7 @@ export async function toggleHabit(habitId: number, targetDate?: string, activeMo
       );
     }
     habitCache.modeStreaks.clear();
+    habitCache.overallStreak = null;
     habitCache.lastFetchedAt = Date.now();
   } else {
     invalidateHabitsCache();
@@ -1024,7 +1121,7 @@ async function updateUserProgressAfterToggle(completedNow: boolean): Promise<voi
 export async function getHabitHistory(
   habitId: number,
   days: number = 30,
-): Promise<{ date: string; completed: number }[]> {
+): Promise<{ date: string; completed: number; completedTier?: HabitDifficultyTier }[]> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
   const to = todayISO();
@@ -1041,24 +1138,125 @@ export async function getHabitHistory(
       return getDoc(doc(db, "users", uid, "entries", iso));
     }),
   );
-  const out: { date: string; completed: number }[] = [];
+  const out: { date: string; completed: number; completedTier?: HabitDifficultyTier }[] = [];
   for (let i = 0; i < snaps.length; i++) {
     const d = new Date(fromISO + "T00:00:00");
     d.setDate(d.getDate() + i);
     const iso = d.toISOString().slice(0, 10);
     const dayData = snaps[i].exists() ? (snaps[i].data() as any) : null;
     let completed = 0;
+    let completedTier: HabitDifficultyTier | undefined;
     if (Array.isArray(dayData?.habits)) {
       const found = dayData.habits.find((h: any) => h.id === habitId);
       completed = found?.completed ? 1 : 0;
+      completedTier = found?.completedTier;
     } else {
       // Legacy doc fallback
       const legSnap = await getDoc(doc(db, "users", uid, "entries", `${habitId}_${iso}`));
       completed = (legSnap.data() as any)?.completed === true ? 1 : 0;
     }
-    if (iso >= fromISO && iso <= to) out.push({ date: iso, completed });
+    if (iso >= fromISO && iso <= to) out.push({ date: iso, completed, completedTier });
   }
   return out.sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+// ─── Routine Experiments (A/B Routine Testing — System 1) ─────
+
+export async function getRoutineExperiments(): Promise<RoutineExperiment[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  try {
+    const snap = await getDoc(doc(db, "users", uid, "meta", "experiments"));
+    if (!snap.exists()) return [];
+    return (snap.data()?.experiments as RoutineExperiment[]) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveRoutineExperiment(experiment: RoutineExperiment): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const current = await getRoutineExperiments();
+  const idx = current.findIndex((e) => e.id === experiment.id);
+  const updated = idx >= 0
+    ? current.map((e, i) => (i === idx ? experiment : e))
+    : [experiment, ...current];
+  await setDoc(
+    doc(db, "users", uid, "meta", "experiments"),
+    {
+      experiments: updated,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+export async function completeRoutineExperiment(
+  id: string,
+  winner: "A" | "B" | "inconclusive",
+  recommendation?: string,
+  results?: { completionRateA: number; completionRateB: number },
+): Promise<void> {
+  const current = await getRoutineExperiments();
+  const target = current.find((e) => e.id === id);
+  if (!target) return;
+  target.status = "completed";
+  target.winner = winner;
+  target.results = {
+    completionRateA: results?.completionRateA ?? target.results?.completionRateA ?? 0,
+    completionRateB: results?.completionRateB ?? target.results?.completionRateB ?? 0,
+    recommendation: recommendation ?? target.results?.recommendation ?? "Experiment concluded.",
+  };
+  await saveRoutineExperiment(target);
+}
+
+export async function cancelRoutineExperiment(id: string): Promise<void> {
+  const current = await getRoutineExperiments();
+  const target = current.find((e) => e.id === id);
+  if (!target) return;
+  target.status = "cancelled";
+  await saveRoutineExperiment(target);
+}
+
+export async function deleteRoutineExperiment(id: string): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const current = await getRoutineExperiments();
+  const updated = current.filter((e) => e.id !== id);
+  await setDoc(
+    doc(db, "users", uid, "meta", "experiments"),
+    {
+      experiments: updated,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+export async function getRecentDailyEntries(days: number = 21): Promise<DailyProgressEntry[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const from = new Date();
+  from.setDate(from.getDate() - days + 1);
+  const fromISO = from.toISOString().slice(0, 10);
+
+  const snaps = await Promise.all(
+    Array.from({ length: days }, (_, i) => {
+      const d = new Date(fromISO + "T00:00:00");
+      d.setDate(d.getDate() + i);
+      const iso = d.toISOString().slice(0, 10);
+      return getDoc(doc(db, "users", uid, "entries", iso));
+    }),
+  );
+
+  const entries: DailyProgressEntry[] = [];
+  snaps.forEach((s) => {
+    if (s.exists()) {
+      entries.push(s.data() as DailyProgressEntry);
+    }
+  });
+  return entries;
 }
 
 async function getCompletedDatesForHabit(uid: string, habitId: number): Promise<string[]> {
@@ -1139,7 +1337,77 @@ export async function getLongestStreak(habitId: number): Promise<number> {
   return longest;
 }
 
-// Mode streak: consecutive days where ≥75% of that mode’s habits are completed.
+/**
+ * Overall streak: consecutive strong days (≥50% habits completed across all routines).
+ * If today has not yet reached 50%, preserves the active unbroken streak carried over from yesterday.
+ */
+export async function getOverallStreak(uid?: string): Promise<number> {
+  const resolvedUid = uid ?? (await requireUid());
+  const { db } = userRoot(resolvedUid);
+
+  if (
+    !uid &&
+    habitCache.overallStreak !== null &&
+    Date.now() - habitCache.lastFetchedAt < 60000
+  ) {
+    return habitCache.overallStreak;
+  }
+
+  const entriesSnap = await getDocs(collection(db, "users", resolvedUid, "entries"));
+  const entriesMap = new Map<string, any>();
+  for (const d of entriesSnap.docs) {
+    entriesMap.set(d.id, d.data());
+  }
+
+  const today = todayISO();
+
+  const isDaySuccess = (dayKey: string): boolean => {
+    let data: any = entriesMap.get(dayKey);
+    if (dayKey === today && habitCache.todayEntry && habitCache.todayEntry.date === today) {
+      data = habitCache.todayEntry;
+    }
+    if (!data) return false;
+
+    if (typeof data.completionPercentage === "number") {
+      return data.completionPercentage >= 50;
+    }
+    const total = Number(data.totalHabits ?? 0);
+    const checked = Number(data.checkedHabits ?? data.completedCount ?? 0);
+    if (total > 0) {
+      return (checked / total) >= 0.5;
+    }
+    if (data.isDetoxDay && checked >= 1) {
+      return true;
+    }
+    return false;
+  };
+
+  const todaySuccess = isDaySuccess(today);
+  let streak = 0;
+
+  if (todaySuccess) {
+    streak = 1;
+    let checkDate = addCalendarDays(today, -1);
+    while (isDaySuccess(checkDate)) {
+      streak += 1;
+      checkDate = addCalendarDays(checkDate, -1);
+    }
+  } else {
+    // Today is in-progress: count backwards from yesterday to preserve active streak
+    let checkDate = addCalendarDays(today, -1);
+    while (isDaySuccess(checkDate)) {
+      streak += 1;
+      checkDate = addCalendarDays(checkDate, -1);
+    }
+  }
+
+  if (!uid) {
+    habitCache.overallStreak = streak;
+  }
+  return streak;
+}
+
+// Mode streak: how many strong days of the active unbroken streak were spent in this mode.
 export async function getModeStreak(mode: Mode): Promise<number> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
@@ -1153,9 +1421,8 @@ export async function getModeStreak(mode: Mode): Promise<number> {
   );
   const modeHabits = habitsSnap.docs
     .map((d) => d.data() as any)
-    .filter((h) => h?.deleted !== true);
-  if (modeHabits.length === 0) return 0;
-  const modeHabitIds = new Set(modeHabits.map((h) => h.id as number));
+    .filter((h) => h?.deleted !== true && !h?.archived);
+  const modeHabitIds = new Set(modeHabits.map((h) => Number(h.id)));
 
   // Query entries subcollection
   const entriesSnap = await getDocs(collection(db, "users", uid, "entries"));
@@ -1164,41 +1431,92 @@ export async function getModeStreak(mode: Mode): Promise<number> {
     entriesMap.set(d.id, d.data());
   }
 
-  const checkDaySuccess = (dayKey: string): boolean => {
-    const data = entriesMap.get(dayKey);
-    if (!data) return false;
-    let done = 0;
-    if (Array.isArray(data.habits)) {
-      done = data.habits.filter((h: any) => modeHabitIds.has(h.id) && h.completed).length;
-    } else if (data.mode === mode && typeof data.checkedHabits === "number") {
-      done = data.checkedHabits;
+  const today = todayISO();
+
+  const isDayOverallSuccess = (dayKey: string): boolean => {
+    let data: any = entriesMap.get(dayKey);
+    if (dayKey === today && habitCache.todayEntry && habitCache.todayEntry.date === today) {
+      data = habitCache.todayEntry;
     }
-    const rate = done / modeHabits.length;
-    return rate >= 0.75;
+    if (!data) return false;
+
+    if (typeof data.completionPercentage === "number") {
+      return data.completionPercentage >= 50;
+    }
+    const total = Number(data.totalHabits ?? 0);
+    const checked = Number(data.checkedHabits ?? data.completedCount ?? 0);
+    if (total > 0) {
+      return (checked / total) >= 0.5;
+    }
+    if (data.isDetoxDay && checked >= 1) {
+      return true;
+    }
+    return false;
   };
 
-  const today = todayISO();
-  let streak = 0;
+  // Find all consecutive dates belonging to the current active unbroken streak
+  const streakDates: string[] = [];
+  const todaySuccess = isDayOverallSuccess(today);
 
-  // 1. If today has already reached ≥75%, include today
-  const todayCompleted = checkDaySuccess(today);
-  if (todayCompleted) {
-    streak += 1;
-  }
-
-  // 2. Count consecutive days backwards starting from yesterday
-  let checkDate = addCalendarDays(today, -1);
-  while (true) {
-    if (checkDaySuccess(checkDate)) {
-      streak += 1;
+  if (todaySuccess) {
+    streakDates.push(today);
+    let checkDate = addCalendarDays(today, -1);
+    while (isDayOverallSuccess(checkDate)) {
+      streakDates.push(checkDate);
       checkDate = addCalendarDays(checkDate, -1);
-    } else {
-      break;
+    }
+  } else {
+    // Today in progress: check if active streak carried over from yesterday
+    let checkDate = addCalendarDays(today, -1);
+    while (isDayOverallSuccess(checkDate)) {
+      streakDates.push(checkDate);
+      checkDate = addCalendarDays(checkDate, -1);
     }
   }
 
-  habitCache.modeStreaks.set(mode, streak);
-  return streak;
+  if (streakDates.length === 0) {
+    habitCache.modeStreaks.set(mode, 0);
+    return 0;
+  }
+
+  const isModeSuccess = (dayKey: string): boolean => {
+    let data: any = entriesMap.get(dayKey);
+    if (dayKey === today && habitCache.todayEntry && habitCache.todayEntry.date === today) {
+      data = habitCache.todayEntry;
+    }
+    if (!data) return false;
+
+    // Check if mode recorded on the entry matches target mode
+    const entryMode: Mode = (data.mode as Mode) ?? "home";
+    const pct = typeof data.completionPercentage === "number" ? data.completionPercentage : null;
+    const checked = Number(data.checkedHabits ?? data.completedCount ?? 0);
+    const total = Number(data.totalHabits ?? 0);
+    const dayPass = pct !== null ? pct >= 50 : total > 0 ? (checked / total) >= 0.5 : (data.isDetoxDay ? checked >= 1 : false);
+
+    if (entryMode === mode && dayPass) {
+      return true;
+    }
+
+    // Also check if habits array had >= 50% completed for this mode's habits
+    if (Array.isArray(data.habits) && data.habits.length > 0 && modeHabits.length > 0) {
+      const done = data.habits.filter((h: any) => modeHabitIds.has(Number(h.id)) && h.completed).length;
+      if (done > 0 && (done / modeHabits.length) >= 0.5) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  let modeCount = 0;
+  for (const d of streakDates) {
+    if (isModeSuccess(d)) {
+      modeCount++;
+    }
+  }
+
+  habitCache.modeStreaks.set(mode, modeCount);
+  return modeCount;
 }
 
 // ─── Analytics for streaks/insights screens ────────────────────
@@ -1871,93 +2189,98 @@ export async function syncAutoChallengeProgress(
   const state = await getChallengesState(resolvedUid);
   let stateChanged = false;
 
+  // Real unbroken overall streak based on historical entries
+  const realStreak = await getOverallStreak(resolvedUid);
+
   // 1. Check if user missed a day before today:
-  // If lastCompletedDate exists and diff > 1 (missed day), reset currentProgress to 0!
+  // If lastCompletedDate exists and diff > 1 (missed day) and realStreak is 0, reset currentProgress to 0!
   if (state.lastCompletedDate && state.lastCompletedDate !== today) {
     const diff = dateDiffInDays(state.lastCompletedDate, today);
-    if (diff > 1 && state.currentProgress > 0) {
+    if (diff > 1 && realStreak === 0 && state.currentProgress > 0) {
       state.currentProgress = 0;
       stateChanged = true;
     }
   }
 
-  if (!targetEntry || (targetEntry.totalHabits ?? 0) === 0) {
-    if (stateChanged) {
-      await setDoc(
-        doc(db, "users", resolvedUid, "challenges", "state"),
-        { currentProgress: state.currentProgress, updatedAt: serverTimestamp() },
-        { merge: true },
-      );
-    }
-    return null;
+  // 2. Self-healing / alignment:
+  // If the user's real unbroken streak is higher than currentProgress (e.g. from the previous bug that wiped progress to 0),
+  // immediately restore currentProgress to the true streak!
+  if (realStreak > state.currentProgress) {
+    state.currentProgress = realStreak;
+    stateChanged = true;
   }
 
-  // Threshold of success: completionPercentage >= 50%
-  const isSuccessDay = (targetEntry.completionPercentage ?? 0) >= 50;
+  // Check if today qualifies as a success day (≥50%)
+  const isSuccessDay = (targetEntry?.completionPercentage ?? 0) >= 50;
+  if (isSuccessDay && state.lastCompletedDate !== today) {
+    state.lastCompletedDate = today;
+    if (state.currentProgress < realStreak) {
+      state.currentProgress = realStreak;
+    } else if (state.currentProgress === 0 && realStreak > 0) {
+      state.currentProgress = realStreak;
+    }
+    stateChanged = true;
+  }
+
   let completedItem: CompletedChallengeItem | undefined;
 
-  if (isSuccessDay) {
-    // If today is NOT yet credited for progress
-    if (state.lastCompletedDate !== today) {
-      // If previous completed day had a gap (> 1 day), reset progress
-      if (state.lastCompletedDate) {
-        const diff = dateDiffInDays(state.lastCompletedDate, today);
-        if (diff > 1) {
-          state.currentProgress = 0;
-        }
-      }
+  // 3. Milestone progression:
+  // Evaluate active challenge. Because challenges are streak milestones (1d, 3d, 5d, 7d...),
+  // when a milestone is completed, advance to next challenge BUT DO NOT wipe currentProgress to 0!
+  // The user carries their unbroken streak onward (e.g. 3 days carries into 5-day challenge, so Day 3/5).
+  let activeDef =
+    MASTER_CHALLENGES.find((c) => c.id === state.activeChallengeId) ??
+    MASTER_CHALLENGES[0];
 
-      state.currentProgress += 1;
-      state.lastCompletedDate = today;
+  while (
+    activeDef &&
+    state.currentProgress >= activeDef.duration &&
+    state.activeChallengeId <= MASTER_CHALLENGES.length
+  ) {
+    const alreadyCompleted = state.completedChallenges.some((c) => c.id === activeDef.id);
+    if (!alreadyCompleted) {
+      completedItem = {
+        id: activeDef.id,
+        defId: activeDef.defId,
+        name: activeDef.name,
+        duration: activeDef.duration,
+        xp: activeDef.xp,
+        completedAt: new Date().toISOString(),
+      };
+      state.completedChallenges.push(completedItem);
+
+      await unlockAchievement(activeDef.defId, {
+        title: activeDef.name,
+        description: activeDef.description,
+      });
+
+      await addXpToUser(resolvedUid, activeDef.xp);
       stateChanged = true;
 
-      // Check if active challenge is completed
-      const activeDef =
-        MASTER_CHALLENGES.find((c) => c.id === state.activeChallengeId) ??
-        MASTER_CHALLENGES[0];
-
-      if (state.currentProgress >= activeDef.duration) {
-        // Active challenge complete!
-        completedItem = {
-          id: activeDef.id,
-          defId: activeDef.defId,
-          name: activeDef.name,
-          duration: activeDef.duration,
-          xp: activeDef.xp,
-          completedAt: new Date().toISOString(),
-        };
-        state.completedChallenges.push(completedItem);
-
-        // Unlock achievement for this challenge
-        await unlockAchievement(activeDef.defId, {
-          title: activeDef.name,
-          description: activeDef.description,
-        });
-
-        // Add XP to user
-        await addXpToUser(resolvedUid, activeDef.xp);
-
-        // Advance to next challenge
-        if (state.activeChallengeId < MASTER_CHALLENGES.length) {
-          state.activeChallengeId += 1;
-        }
-        state.currentProgress = 0;
-
-        // Best-effort push notification
-        if (Platform.OS !== "web") {
-          try {
-            const Notifications = await import("expo-notifications");
-            await Notifications.scheduleNotificationAsync({
-              content: {
-                title: "🏆 Challenge Completed!",
-                body: `You completed "${completedItem.name}". Next challenge unlocked!`,
-                sound: true,
-              },
-              trigger: null,
-            });
-          } catch { }
-        }
+      // Best-effort push notification
+      if (Platform.OS !== "web") {
+        try {
+          const Notifications = await import("expo-notifications");
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "🏆 Challenge Completed!",
+              body: `You completed "${completedItem.name}". Next challenge unlocked!`,
+              sound: true,
+            },
+            trigger: null,
+          });
+        } catch { }
       }
+    }
+
+    if (state.activeChallengeId < MASTER_CHALLENGES.length) {
+      state.activeChallengeId += 1;
+      stateChanged = true;
+      activeDef =
+        MASTER_CHALLENGES.find((c) => c.id === state.activeChallengeId) ??
+        MASTER_CHALLENGES[MASTER_CHALLENGES.length - 1];
+    } else {
+      break;
     }
   }
 
@@ -1992,13 +2315,18 @@ export async function getChallenges(): Promise<Challenge[]> {
   if (state.lastCompletedDate && state.currentProgress > 0) {
     const diff = dateDiffInDays(state.lastCompletedDate, today);
     if (diff > 1) {
-      state.currentProgress = 0;
-      const { db } = userRoot(uid);
-      await setDoc(
-        doc(db, "users", uid, "challenges", "state"),
-        { currentProgress: 0, updatedAt: serverTimestamp() },
-        { merge: true },
-      );
+      const realStreak = await getOverallStreak(uid);
+      if (realStreak === 0) {
+        state.currentProgress = 0;
+        const { db } = userRoot(uid);
+        await setDoc(
+          doc(db, "users", uid, "challenges", "state"),
+          { currentProgress: 0, updatedAt: serverTimestamp() },
+          { merge: true },
+        );
+      } else {
+        state.currentProgress = realStreak;
+      }
     }
   }
 
@@ -2055,9 +2383,10 @@ export async function getChallenges(): Promise<Challenge[]> {
 export async function startChallenge(id: number): Promise<void> {
   const uid = await requireUid();
   const { db } = userRoot(uid);
+  const realStreak = await getOverallStreak(uid);
   await setDoc(
     doc(db, "users", uid, "challenges", "state"),
-    { activeChallengeId: id, currentProgress: 0, updatedAt: serverTimestamp() },
+    { activeChallengeId: id, currentProgress: realStreak, updatedAt: serverTimestamp() },
     { merge: true },
   );
 }
@@ -2069,6 +2398,7 @@ export async function incrementChallengeProgress(id: number): Promise<boolean> {
   const activeDef = MASTER_CHALLENGES.find((c) => c.id === id) ?? MASTER_CHALLENGES[0];
   const next = state.currentProgress + 1;
   const finished = next >= activeDef.duration;
+  state.currentProgress = next;
   if (finished) {
     state.completedChallenges.push({
       id: activeDef.id,
@@ -2081,9 +2411,6 @@ export async function incrementChallengeProgress(id: number): Promise<boolean> {
     if (state.activeChallengeId < MASTER_CHALLENGES.length) {
       state.activeChallengeId += 1;
     }
-    state.currentProgress = 0;
-  } else {
-    state.currentProgress = next;
   }
   const { db } = userRoot(uid);
   await setDoc(
@@ -3003,5 +3330,753 @@ export async function setDeepWorkDailyTargetMinutes(min: number): Promise<void> 
     { merge: true },
   );
 }
+
+// ─── Spiritual challenges (Firestore) ─────────────────────────
+
+function mondayOfISOWeek(iso: string): string {
+  const d = new Date(iso + "T12:00:00");
+  const dow = d.getDay();
+  const offset = dow === 0 ? -6 : 1 - dow;
+  d.setDate(d.getDate() + offset);
+  return d.toISOString().slice(0, 10);
+}
+
+function spiritualDailyStreakFromDates(dates: string[]): number {
+  if (dates.length === 0) return 0;
+  const dateSet = new Set(dates);
+  const sortedDesc = [...dates].sort((a, b) => b.localeCompare(a));
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  const firstDate = new Date(sortedDesc[0] + "T00:00:00");
+  if (cursor.getTime() - firstDate.getTime() > 86_400_000) {
+    return 0;
+  }
+  let streak = 0;
+  while (true) {
+    const iso = cursor.toISOString().slice(0, 10);
+    if (!dateSet.has(iso)) break;
+    streak++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+function spiritualWeekDaysInCurrentWeek(dates: string[], todayIso: string): number {
+  const dateSet = new Set(dates);
+  const mon = mondayOfISOWeek(todayIso);
+  let n = 0;
+  for (let i = 0; i < 7; i++) {
+    if (dateSet.has(addCalendarDays(mon, i))) n++;
+  }
+  return n;
+}
+
+function spiritualWeeklyStreakFromDates(dates: string[]): number {
+  if (dates.length === 0) return 0;
+  const byWeek = new Map<string, Set<string>>();
+  for (const dt of dates) {
+    const m = mondayOfISOWeek(dt);
+    if (!byWeek.has(m)) byWeek.set(m, new Set());
+    byWeek.get(m)!.add(dt);
+  }
+  const fullWeekMondays: string[] = [];
+  for (const [mon, days] of byWeek) {
+    if (days.size >= 7) fullWeekMondays.push(mon);
+  }
+  fullWeekMondays.sort((a, b) => a.localeCompare(b));
+  if (fullWeekMondays.length === 0) return 0;
+  let streak = 1;
+  for (let i = fullWeekMondays.length - 1; i > 0; i--) {
+    const latest = fullWeekMondays[i];
+    const before = fullWeekMondays[i - 1];
+    if (addCalendarDays(before, 7) === latest) streak++;
+    else break;
+  }
+  return streak;
+}
+
+const DEFAULT_SPIRITUAL_CHALLENGES: Array<{
+  id: number;
+  slug: string;
+  title: string;
+  description: string;
+  cadence: SpiritualCadence;
+  sortOrder: number;
+}> = [
+  {
+    id: 1,
+    slug: "quran_5_ruku",
+    title: "Quran (5 rukū)",
+    description: "Read at least five rukū today.",
+    cadence: "daily",
+    sortOrder: 10,
+  },
+  {
+    id: 2,
+    slug: "surah_yaseen",
+    title: "Surah Yaseen (morning)",
+    description: "Recite Surah Yaseen in the morning.",
+    cadence: "daily",
+    sortOrder: 20,
+  },
+  {
+    id: 3,
+    slug: "surah_mulk",
+    title: "Surah Mulk (night)",
+    description: "Recite Surah Mulk at night.",
+    cadence: "daily",
+    sortOrder: 30,
+  },
+  {
+    id: 4,
+    slug: "azkar",
+    title: "Azkar",
+    description: "Morning and evening adhkar.",
+    cadence: "daily",
+    sortOrder: 40,
+  },
+  {
+    id: 5,
+    slug: "quran_consistency_week",
+    title: "Quran consistency challenge",
+    description:
+      "Stay consistent with Quran all week — log each day. Streak counts full Mon–Sun weeks.",
+    cadence: "weekly",
+    sortOrder: 50,
+  },
+  {
+    id: 6,
+    slug: "namaz_completion_week",
+    title: "Namaz completion challenge",
+    description:
+      "Complete all five prayers every day. Streak counts full weeks with 7/7 days logged.",
+    cadence: "weekly",
+    sortOrder: 60,
+  },
+];
+
+export async function getSpiritualChallengesDashboard(
+  date: string = todayISO(),
+): Promise<SpiritualChallengeDashboard[]> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "spiritual", "state");
+  const snap = await getDoc(ref);
+  const data = (snap.data() as { completions?: Record<string, string[]> }) ?? {};
+  const completions = data.completions ?? {};
+
+  return DEFAULT_SPIRITUAL_CHALLENGES.map((def) => {
+    const ds = completions[String(def.id)] ?? [];
+    const completedToday = ds.includes(date);
+    const streak =
+      def.cadence === "weekly"
+        ? spiritualWeeklyStreakFromDates(ds)
+        : spiritualDailyStreakFromDates(ds);
+    const weekDaysComplete =
+      def.cadence === "weekly"
+        ? spiritualWeekDaysInCurrentWeek(ds, date)
+        : 0;
+
+    return {
+      ...def,
+      completedToday,
+      streak,
+      weekDaysComplete,
+    };
+  });
+}
+
+export async function toggleSpiritualChallengeDay(
+  challengeId: number,
+  date?: string,
+): Promise<boolean> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const day = date ?? todayISO();
+  const ref = doc(db, "users", uid, "spiritual", "state");
+
+  return await runTransaction(db, async (txn) => {
+    const snap = await txn.get(ref);
+    const data = (snap.data() as { completions?: Record<string, string[]> }) ?? {};
+    const completions = { ...(data.completions ?? {}) };
+    const key = String(challengeId);
+    const currentList = Array.isArray(completions[key]) ? [...completions[key]] : [];
+
+    const idx = currentList.indexOf(day);
+    let isCompletedNow = false;
+    if (idx >= 0) {
+      currentList.splice(idx, 1);
+      isCompletedNow = false;
+    } else {
+      currentList.push(day);
+      isCompletedNow = true;
+    }
+    completions[key] = currentList;
+    txn.set(ref, { completions, updatedAt: serverTimestamp() }, { merge: true });
+    return isCompletedNow;
+  });
+}
+
+// ─── Time blocks (Firestore) ───────────────────────────────────
+
+export async function getTimeBlocks(activeOnly = false): Promise<TimeBlock[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "time_blocks");
+    const snap = await getDocs(col);
+    const blocks: TimeBlock[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const b: TimeBlock = {
+        id: Number(data.id ?? d.id),
+        category: data.category,
+        label: data.label ?? "",
+        startTime: data.startTime ?? "",
+        endTime: data.endTime ?? "",
+        sortOrder: Number(data.sortOrder ?? 0),
+        active: Number(data.active ?? 1),
+      };
+      if (!activeOnly || b.active === 1) {
+        blocks.push(b);
+      }
+    }
+    blocks.sort((a, b) => {
+      if (a.category !== b.category) return a.category.localeCompare(b.category);
+      if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+      return a.id - b.id;
+    });
+    return blocks;
+  } catch (e) {
+    console.warn("getTimeBlocks failed in Firestore:", e);
+    return [];
+  }
+}
+
+export async function addTimeBlock(
+  b: Omit<TimeBlock, "id" | "active"> & { active?: number },
+): Promise<number> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const id = Date.now();
+  const ref = doc(db, "users", uid, "time_blocks", String(id));
+  await setDoc(ref, {
+    id,
+    category: b.category,
+    label: b.label,
+    startTime: b.startTime,
+    endTime: b.endTime,
+    sortOrder: b.sortOrder ?? 0,
+    active: b.active ?? 1,
+    createdAt: serverTimestamp(),
+  });
+  return id;
+}
+
+export async function updateTimeBlock(
+  id: number,
+  updates: Partial<
+    Pick<
+      TimeBlock,
+      "label" | "startTime" | "endTime" | "sortOrder" | "active" | "category"
+    >
+  >,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "time_blocks", String(id));
+  await updateDoc(ref, {
+    ...updates,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteTimeBlock(id: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await deleteDoc(doc(db, "users", uid, "time_blocks", String(id)));
+}
+
+export async function getTimeBlockLog(
+  blockId: number,
+  date: string,
+): Promise<boolean> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const ref = doc(db, "users", uid, "time_block_logs", `${blockId}_${date}`);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return false;
+    const data = snap.data() as any;
+    return Number(data.completed ?? 0) === 1;
+  } catch {
+    return false;
+  }
+}
+
+export async function setTimeBlockLog(
+  blockId: number,
+  date: string,
+  completed: boolean,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "time_block_logs", `${blockId}_${date}`);
+  await setDoc(
+    ref,
+    {
+      blockId,
+      date,
+      completed: completed ? 1 : 0,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+// ─── Body Weight & Goal (Firestore) ───────────────────────────
+
+export async function logBodyWeight(date: string, kg: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const ref = doc(db, "users", uid, "body_weights", date);
+  await setDoc(ref, { date, kg, updatedAt: serverTimestamp() }, { merge: true });
+  // Also keep metrics_daily synced
+  await saveMetrics({ weightKg: kg, date }).catch(() => {});
+}
+
+export async function getBodyWeights(
+  from: string,
+  to: string,
+): Promise<BodyWeightEntry[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "body_weights");
+    const snap = await getDocs(query(col, limit(500)));
+    const list: BodyWeightEntry[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const dt = String(data.date ?? d.id);
+      if (dt >= from && dt <= to) {
+        list.push({ date: dt, kg: Number(data.kg ?? 0) });
+      }
+    }
+    list.sort((a, b) => a.date.localeCompare(b.date));
+    return list;
+  } catch (e) {
+    console.warn("getBodyWeights failed in Firestore:", e);
+    return [];
+  }
+}
+
+export async function getGoalWeightKg(): Promise<number | null> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+    if (!snap.exists()) return null;
+    const val = (snap.data() as any)?.body_goal_kg;
+    const n = parseFloat(String(val));
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setGoalWeightKg(kg: number | null): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await setDoc(
+    doc(db, "users", uid, "meta", "state"),
+    {
+      body_goal_kg: kg !== null ? kg : null,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+// ─── Body Exercise (Firestore) ────────────────────────────────
+
+export async function addExerciseEntry(
+  date: string,
+  type: string,
+  durationMinutes: number,
+): Promise<number> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const id = Date.now();
+  const minutes = Math.max(0, Math.round(durationMinutes));
+  const ref = doc(db, "users", uid, "body_exercise", String(id));
+  await setDoc(ref, {
+    id,
+    date,
+    type,
+    durationMinutes: minutes,
+    createdAt: serverTimestamp(),
+  });
+  return id;
+}
+
+export async function getExerciseEntries(
+  from: string,
+  to: string,
+): Promise<ExerciseEntry[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "body_exercise");
+    const snap = await getDocs(query(col, limit(500)));
+    const list: ExerciseEntry[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const dt = String(data.date ?? "");
+      if (dt >= from && dt <= to) {
+        list.push({
+          id: Number(data.id ?? d.id),
+          date: dt,
+          type: String(data.type ?? ""),
+          durationMinutes: Number(data.durationMinutes ?? 0),
+        });
+      }
+    }
+    list.sort((a, b) => {
+      if (b.date !== a.date) return b.date.localeCompare(a.date);
+      return b.id - a.id;
+    });
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export async function getExerciseMinutesForDate(date: string): Promise<number> {
+  try {
+    const entries = await getExerciseEntries(date, date);
+    return entries.reduce((acc, curr) => acc + curr.durationMinutes, 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function getExerciseMinutesByDay(
+  from: string,
+  to: string,
+): Promise<{ date: string; minutes: number }[]> {
+  try {
+    const entries = await getExerciseEntries(from, to);
+    const map = new Map<string, number>();
+    for (const e of entries) {
+      map.set(e.date, (map.get(e.date) ?? 0) + e.durationMinutes);
+    }
+    const res: { date: string; minutes: number }[] = [];
+    for (const [dt, min] of map.entries()) {
+      res.push({ date: dt, minutes: min });
+    }
+    res.sort((a, b) => a.date.localeCompare(b.date));
+    return res;
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteExerciseEntry(id: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await deleteDoc(doc(db, "users", uid, "body_exercise", String(id)));
+}
+
+// ─── Diet Meals & Rules (Firestore) ───────────────────────────
+
+export async function addDietMeal(opts: {
+  date: string;
+  slot?: string;
+  quality: MealQuality;
+  overeating: boolean;
+  hour: number;
+}): Promise<number> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const id = Date.now();
+  const ref = doc(db, "users", uid, "diet_meals", String(id));
+  await setDoc(ref, {
+    id,
+    date: opts.date,
+    slot: opts.slot ?? "meal",
+    quality: opts.quality,
+    overeating: opts.overeating ? 1 : 0,
+    hour: Math.min(23, Math.max(0, Math.round(opts.hour))),
+    createdAt: serverTimestamp(),
+  });
+  return id;
+}
+
+export async function getDietMealsForDate(date: string): Promise<DietMeal[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "diet_meals");
+    const snap = await getDocs(query(col, limit(500)));
+    const list: DietMeal[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      if (data.date === date) {
+        list.push({
+          id: Number(data.id ?? d.id),
+          date: data.date,
+          slot: data.slot ?? "meal",
+          quality: data.quality,
+          overeating: Number(data.overeating ?? 0),
+          hour: Number(data.hour ?? 12),
+        });
+      }
+    }
+    list.sort((a, b) => {
+      if (a.hour !== b.hour) return a.hour - b.hour;
+      return a.id - b.id;
+    });
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export async function getDietMealsRange(
+  from: string,
+  to: string,
+): Promise<DietMeal[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "diet_meals");
+    const snap = await getDocs(query(col, limit(500)));
+    const list: DietMeal[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const dt = String(data.date ?? "");
+      if (dt >= from && dt <= to) {
+        list.push({
+          id: Number(data.id ?? d.id),
+          date: dt,
+          slot: data.slot ?? "meal",
+          quality: data.quality,
+          overeating: Number(data.overeating ?? 0),
+          hour: Number(data.hour ?? 12),
+        });
+      }
+    }
+    list.sort((a, b) => {
+      if (b.date !== a.date) return b.date.localeCompare(a.date);
+      return b.hour - a.hour;
+    });
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteDietMeal(id: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await deleteDoc(doc(db, "users", uid, "diet_meals", String(id)));
+}
+
+const defaultDietRules: DietRules = {
+  noLateEating: true,
+  lateHour: 21,
+  lightDinner: true,
+  noJunkWeekdays: false,
+};
+
+export async function getDietRules(): Promise<DietRules> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+    if (!snap.exists()) return { ...defaultDietRules };
+    const saved = (snap.data() as any)?.diet_rules as Partial<DietRules> | undefined;
+    if (!saved) return { ...defaultDietRules };
+    return {
+      noLateEating: Boolean(saved.noLateEating ?? defaultDietRules.noLateEating),
+      lateHour: typeof saved.lateHour === "number" ? saved.lateHour : defaultDietRules.lateHour,
+      lightDinner: Boolean(saved.lightDinner ?? defaultDietRules.lightDinner),
+      noJunkWeekdays: Boolean(saved.noJunkWeekdays ?? defaultDietRules.noJunkWeekdays),
+    };
+  } catch {
+    return { ...defaultDietRules };
+  }
+}
+
+export async function setDietRules(rules: DietRules): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await setDoc(
+    doc(db, "users", uid, "meta", "state"),
+    {
+      diet_rules: rules,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+// ─── Urge Logs (Firestore) ────────────────────────────────────
+
+export async function logUrge(opts: {
+  intensity: number;
+  triggerTag?: string;
+  note?: string;
+  loggedAt?: string;
+}): Promise<number> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const id = Date.now();
+  const iso = opts.loggedAt ?? new Date().toISOString();
+  const inten = Math.min(10, Math.max(1, Math.round(opts.intensity)));
+  const ref = doc(db, "users", uid, "urge_logs", String(id));
+  await setDoc(ref, {
+    id,
+    loggedAt: iso,
+    intensity: inten,
+    triggerTag: opts.triggerTag ?? "",
+    note: opts.note ?? "",
+    createdAt: serverTimestamp(),
+  });
+  return id;
+}
+
+export async function getUrgeLogs(limitCount = 300): Promise<UrgeLog[]> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const col = collection(db, "users", uid, "urge_logs");
+    const snap = await getDocs(query(col, limit(limitCount)));
+    const list: UrgeLog[] = [];
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      list.push({
+        id: Number(data.id ?? d.id),
+        loggedAt: String(data.loggedAt ?? ""),
+        intensity: Number(data.intensity ?? 5),
+        triggerTag: String(data.triggerTag ?? ""),
+        note: String(data.note ?? ""),
+      });
+    }
+    list.sort((a, b) => b.id - a.id);
+    return list.slice(0, limitCount);
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteUrgeLog(id: number): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await deleteDoc(doc(db, "users", uid, "urge_logs", String(id)));
+}
+
+// ─── Daily Reset Journal (Firestore) ──────────────────────────
+
+export async function getDailyReset(date = todayISO()): Promise<DailyReset | null> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const snap = await getDoc(doc(db, "users", uid, "daily_reset", date));
+    if (!snap.exists()) return null;
+    const data = snap.data() as any;
+    return {
+      date,
+      morningPlan: String(data.morningPlan ?? ""),
+      nightReflection: String(data.nightReflection ?? ""),
+      morningSavedAt: data.morningSavedAt ?? null,
+      nightSavedAt: data.nightSavedAt ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveDailyMorning(
+  date: string,
+  plan: string,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const iso = new Date().toISOString();
+  await setDoc(
+    doc(db, "users", uid, "daily_reset", date),
+    {
+      date,
+      morningPlan: plan,
+      morningSavedAt: iso,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+export async function saveDailyNight(
+  date: string,
+  reflection: string,
+): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  const iso = new Date().toISOString();
+  await setDoc(
+    doc(db, "users", uid, "daily_reset", date),
+    {
+      date,
+      nightReflection: reflection,
+      nightSavedAt: iso,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+// ─── Anti-Laziness Toggle (Firestore) ─────────────────────────
+
+export async function getAntiLazinessEnabled(): Promise<boolean> {
+  try {
+    const uid = await requireUid();
+    const { db } = userRoot(uid);
+    const snap = await getDoc(doc(db, "users", uid, "meta", "state"));
+    if (!snap.exists()) return false;
+    return Boolean((snap.data() as any)?.anti_laziness_enabled);
+  } catch {
+    return false;
+  }
+}
+
+export async function setAntiLazinessEnabled(enabled: boolean): Promise<void> {
+  const uid = await requireUid();
+  const { db } = userRoot(uid);
+  await setDoc(
+    doc(db, "users", uid, "meta", "state"),
+    {
+      anti_laziness_enabled: enabled,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+export async function getHabitCompletionForDate(
+  date: string,
+): Promise<{ total: number; done: number }> {
+  try {
+    const entry = await getDailyEntry(date);
+    if (!entry || !entry.habits) {
+      return { total: 0, done: 0 };
+    }
+    const total = entry.habits.length;
+    const done = entry.habits.filter((h) => h.completed).length;
+    return { total, done };
+  } catch {
+    return { total: 0, done: 0 };
+  }
+}
+
 
 

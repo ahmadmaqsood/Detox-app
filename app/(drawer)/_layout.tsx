@@ -71,7 +71,7 @@ const DRAWER_ITEMS: DrawerItem[] = [
     icon: { ios: "hands.sparkles.fill", material: "hands-pray" },
   },
   {
-    label: "Body",
+    label: "Fitness",
     route: "/(drawer)/body",
     icon: { ios: "figure.run", material: "run" },
   },

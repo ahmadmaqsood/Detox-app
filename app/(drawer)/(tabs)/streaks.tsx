@@ -1,45 +1,35 @@
-import { PlatformSymbol } from "@/components/PlatformSymbol";
-import { type DrawerNavigationProp } from "@react-navigation/drawer";
+import React, { useCallback, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+} from "react-native";
+import Animated, { FadeIn, FadeInDown } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useFocusEffect, useNavigation } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
-import Animated, {
-  Easing,
-  FadeIn,
-  FadeInDown,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-  withTiming,
-} from "react-native-reanimated";
+import { type DrawerNavigationProp } from "@react-navigation/drawer";
 
-import { Card } from "@/components/Card";
+import { PlatformSymbol } from "@/components/PlatformSymbol";
 import { Body, Caption, Heading } from "@/components/Typography";
+import { DayRankingCard } from "@/components/analytics/DayRankingCard";
+import { GlowBarCard } from "@/components/analytics/GlowBarCard";
+import { GlowWaveCard } from "@/components/analytics/GlowWaveCard";
+import { HabitAdoptionCard } from "@/components/analytics/HabitAdoptionCard";
+import { HabitFlowMatrix } from "@/components/analytics/HabitFlowMatrix";
+import { ModeDetoxCard } from "@/components/analytics/ModeDetoxCard";
+import { TimeRangeFilter } from "@/components/analytics/TimeRangeFilter";
 import {
-  getGlobalLongestStreak,
-  getGlobalStreak,
-  getHeatmapData,
-  getInsightSignals,
-  getModeComparisonStats,
-  getMonthlyStats,
-  getScreenTimeVsDiscipline,
-  getWeeklyStats,
-  getYearlyStats,
-  type ModeComparison,
-  type PeriodStats,
-  type ScreenTimeDiscipline,
-} from "@/lib/firestoreDatabase";
-import {
-  buildDeepInsights,
-  type DeepInsight,
-} from "@/lib/insightsEngine";
+  type AnalyticsTimeRange,
+  type ProgressAnalyticsReport,
+  getProgressAnalyticsReport,
+} from "@/lib/progressAnalyticsService";
 import { useScrollToTopOnTabFocus } from "@/lib/useScrollToTopOnTabFocus";
 import { useAppTheme } from "@/theme";
 import { radius, spacing } from "@/theme/spacing";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-
-// ────────────────────────────────────────────────────────────────
 
 export default function StreaksScreen() {
   const t = useAppTheme();
@@ -47,1089 +37,331 @@ export default function StreaksScreen() {
   const navigation = useNavigation<DrawerNavigationProp<any>>();
   const scrollRef = useScrollToTopOnTabFocus();
 
-  const [streak, setStreak] = useState(0);
-  const [bestStreak, setBestStreak] = useState(0);
-  const [heatmap, setHeatmap] = useState<{ date: string; rate: number }[]>([]);
-  const [weekly, setWeekly] = useState<PeriodStats[]>([]);
-  const [monthly, setMonthly] = useState<PeriodStats[]>([]);
-  const [yearly, setYearly] = useState<PeriodStats[]>([]);
-  const [modeComp, setModeComp] = useState<ModeComparison[]>([]);
-  const [screenVsDiscipline, setScreenVsDiscipline] = useState<
-    ScreenTimeDiscipline[]
-  >([]);
-  const [deepInsights, setDeepInsights] = useState<DeepInsight[]>([]);
+  const [timeRange, setTimeRange] = useState<AnalyticsTimeRange>("30d");
+  const [report, setReport] = useState<ProgressAnalyticsReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const loadData = useCallback(async () => {
-    const [s, bs, hm, ws, ms, ys, mc, sd, sig] = await Promise.all([
-      getGlobalStreak(),
-      getGlobalLongestStreak(),
-      getHeatmapData(49),
-      getWeeklyStats(4),
-      getMonthlyStats(6),
-      getYearlyStats(),
-      getModeComparisonStats(),
-      getScreenTimeVsDiscipline(14),
-      getInsightSignals(),
-    ]);
-    setStreak(s);
-    setBestStreak(bs);
-    setHeatmap(hm);
-    setWeekly(ws);
-    setMonthly(ms);
-    setYearly(ys);
-    setModeComp(mc);
-    setScreenVsDiscipline(sd);
-    setDeepInsights(buildDeepInsights(sig));
+  const loadData = useCallback(async (range: AnalyticsTimeRange, isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
+
+    try {
+      const data = await getProgressAnalyticsReport(range);
+      setReport(data);
+    } catch (e) {
+      console.warn("Failed loading progress analytics:", e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [loadData]),
+      loadData(timeRange);
+    }, [loadData, timeRange]),
   );
 
-  const dayLabels = ["M", "T", "W", "T", "F", "S", "S"];
+  const handleRangeChange = (newRange: AnalyticsTimeRange) => {
+    setTimeRange(newRange);
+    loadData(newRange);
+  };
+
+  const handleRefresh = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    loadData(timeRange, true);
+  };
+
+  const openDrawer = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    (navigation as any).openDrawer?.() ??
+      navigation.getParent<DrawerNavigationProp<any>>()?.openDrawer();
+  };
+
+  // Prepare data for 4 glowing progress cards
+  const series = report?.correlationSeries ?? [];
+
+  // 1. Screen Control data
+  const screenPoints = series.map((s) => Math.max(10, 100 - Math.min(100, s.screenTimeMinutes / 2.5)));
+  const avgScreenTime =
+    series.length > 0
+      ? Math.round(series.reduce((sum, s) => sum + s.screenTimeMinutes, 0) / series.length)
+      : 0;
+
+  // 2. Sleep data
+  const sleepPoints = series.map((s) => s.sleepHours * 10);
+  const validSleep = series.filter((s) => s.sleepHours > 0);
+  const avgSleep =
+    validSleep.length > 0
+      ? (validSleep.reduce((sum, s) => sum + s.sleepHours, 0) / validSleep.length).toFixed(1)
+      : "0";
+
+  // 3. Steps data
+  const stepBars = series.map((s) => s.steps);
+  const validSteps = series.filter((s) => s.steps > 0);
+  const avgSteps =
+    validSteps.length > 0
+      ? Math.round(validSteps.reduce((sum, s) => sum + s.steps, 0) / validSteps.length)
+      : 0;
+
+  // 4. Deep Work Focus data
+  const focusBars = series.map((s) => s.focusMinutes);
+  const totalFocus = series.reduce((sum, s) => sum + s.focusMinutes, 0);
+
+  const rangeLabelMap: Record<AnalyticsTimeRange, string> = {
+    "7d": "Last 7 Days",
+    "30d": "Last 30 Days",
+    "90d": "Last 3 Months",
+    "180d": "Last 6 Months",
+    "365d": "Last 1 Year",
+  };
 
   return (
-    <View style={{ flex: 1, backgroundColor: t.background }}>
-      {/* ─── Header ────────────────────────────── */}
-      <View
-        style={[styles.screenHeader, { paddingTop: insets.top + spacing.md }]}
-      >
-        <Pressable
-          onPress={() => {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            navigation.getParent<DrawerNavigationProp<any>>()?.openDrawer();
-          }}
-          hitSlop={12}
-        >
-          <PlatformSymbol
-            ios="line.3.horizontal"
-            material="menu"
-            tintColor={t.textPrimary}
-            size={22}
-          />
-        </Pressable>
-        <Heading variant="title3">Insights</Heading>
-        <View style={{ width: 22 }} />
-      </View>
-
-      <ScrollView
-        ref={scrollRef}
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* ─── Big Streak Counter ─────────────────── */}
-        <Animated.View entering={FadeIn.duration(400)}>
-          <View style={[styles.heroCard, { backgroundColor: t.card }]}>
-            <View
-              style={[styles.fireGlow, { backgroundColor: t.accent + "15" }]}
-            >
-              <PlatformSymbol
-                ios="flame.fill"
-                material="whatshot"
-                tintColor={t.accent}
-                size={36}
-              />
-            </View>
-            <AnimatedCounter value={streak} color={t.accent} />
-            <Body variant="bodyMedium" color={t.textSecondary}>
-              Day Streak
-            </Body>
-            <View style={styles.heroSubRow}>
-              <View style={styles.heroSub}>
-                <PlatformSymbol
-                  ios="trophy.fill"
-                  material="emoji_events"
-                  tintColor="#F59E0B"
-                  size={14}
-                />
-                <Caption variant="caption1" color={t.textMuted}>
-                  Best: {bestStreak}d
-                </Caption>
-              </View>
-              <View
-                style={[styles.heroDivider, { backgroundColor: t.border }]}
-              />
-              <View style={styles.heroSub}>
-                <PlatformSymbol
-                  ios="target"
-                  material="track_changes"
-                  tintColor="#60A5FA"
-                  size={14}
-                />
-                <Caption variant="caption1" color={t.textMuted}>
-                  Goal: 180d
-                </Caption>
-              </View>
-            </View>
-            <StreakProgressBar
-              current={streak}
-              goal={180}
-              color={t.accent}
-              track={t.background}
+    <View style={{ flex: 1, backgroundColor: "#0A0F1D" }}>
+      {/* ─── Screen Header ────────────────────────────── */}
+      <View style={[styles.screenHeader, { paddingTop: insets.top + spacing.md }]}>
+        <View style={styles.headerLeft}>
+          <Pressable onPress={openDrawer} hitSlop={12} style={styles.menuBtn}>
+            <PlatformSymbol
+              ios="line.3.horizontal"
+              material="menu"
+              tintColor="#F8FAFC"
+              size={22}
             />
+          </Pressable>
+          <View>
+            <Heading variant="title3" color="#F8FAFC" style={{ fontWeight: "800" }}>
+              Habit Flow
+            </Heading>
+            <Caption variant="caption2" color="#64748B">
+              Progress & Personal Insights
+            </Caption>
           </View>
-        </Animated.View>
-
-        {/* ─── Deep insights (engine) ────────────── */}
-        {deepInsights.length > 0 && (
-          <Animated.View entering={FadeInDown.delay(55).duration(300)}>
-            <Card>
-              <View style={styles.sectionHeader}>
-                <Body variant="headline">Deep insights</Body>
-                <Caption variant="caption2" color={t.textMuted}>
-                  From your data
-                </Caption>
-              </View>
-              <View style={{ gap: spacing.md }}>
-                {deepInsights.map((ins) => (
-                  <View
-                    key={ins.id}
-                    style={[
-                      styles.insightBlock,
-                      {
-                        borderLeftColor:
-                          ins.tone === "warning"
-                            ? t.warning
-                            : ins.tone === "positive"
-                              ? t.accent
-                              : t.border,
-                      },
-                    ]}
-                  >
-                    <Caption
-                      variant="caption1"
-                      color={
-                        ins.tone === "warning"
-                          ? t.warning
-                          : ins.tone === "positive"
-                            ? t.accent
-                            : t.textMuted
-                      }
-                      style={{ fontWeight: "700", marginBottom: spacing.xs }}
-                    >
-                      {ins.title}
-                    </Caption>
-                    <Body variant="callout" color={t.textSecondary}>
-                      {ins.body}
-                    </Body>
-                  </View>
-                ))}
-              </View>
-            </Card>
-          </Animated.View>
-        )}
-
-        {/* ─── 7-Week Heatmap ────────────────────── */}
-        <Animated.View entering={FadeInDown.delay(100).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Activity Heatmap</Body>
-              <Caption variant="caption2" color={t.textMuted}>
-                Last 7 weeks
-              </Caption>
-            </View>
-            <View style={styles.heatmapDayLabels}>
-              {dayLabels.map((d, i) => (
-                <Caption
-                  key={i}
-                  variant="caption2"
-                  color={t.textMuted}
-                  style={styles.heatmapDayLabel}
-                >
-                  {i % 2 === 0 ? d : ""}
-                </Caption>
-              ))}
-            </View>
-            <View style={styles.heatmapGrid}>
-              {buildHeatmapColumns(heatmap, t.accent, t.border).map(
-                (col, ci) => (
-                  <View key={ci} style={styles.heatmapCol}>
-                    {col.map((cell, ri) => (
-                      <View
-                        key={ri}
-                        style={[
-                          styles.heatmapCell,
-                          { backgroundColor: cell.color },
-                        ]}
-                      />
-                    ))}
-                  </View>
-                ),
-              )}
-            </View>
-            <View style={styles.heatmapLegend}>
-              <Caption variant="caption2" color={t.textMuted}>
-                Less
-              </Caption>
-              {[0, 0.25, 0.5, 0.75, 1].map((lvl) => (
-                <View
-                  key={lvl}
-                  style={[
-                    styles.legendSquare,
-                    {
-                      backgroundColor: lvl === 0 ? t.border : t.accent,
-                      opacity: Math.max(lvl, 0.15),
-                    },
-                  ]}
-                />
-              ))}
-              <Caption variant="caption2" color={t.textMuted}>
-                More
-              </Caption>
-            </View>
-          </Card>
-        </Animated.View>
-
-        {/* ─── Weekly Stats ──────────────────────── */}
-        <Animated.View entering={FadeInDown.delay(150).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Weekly</Body>
-              <PlatformSymbol
-                ios="calendar"
-                material="date_range"
-                tintColor={t.textMuted}
-                size={16}
-              />
-            </View>
-            {weekly.length === 0 ? (
-              <EmptyHint t={t} />
-            ) : (
-              <View style={styles.periodList}>
-                {weekly.map((w, i) => (
-                  <PeriodRow
-                    key={i}
-                    stat={w}
-                    color={getPeriodColor(i)}
-                    t={t}
-                    isFirst={i === 0}
-                  />
-                ))}
-              </View>
-            )}
-          </Card>
-        </Animated.View>
-
-        {/* ─── Monthly Stats ─────────────────────── */}
-        <Animated.View entering={FadeInDown.delay(200).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Monthly</Body>
-              <PlatformSymbol
-                ios="chart.bar.fill"
-                material="bar_chart"
-                tintColor={t.textMuted}
-                size={16}
-              />
-            </View>
-            {monthly.length === 0 ? (
-              <EmptyHint t={t} />
-            ) : (
-              <View style={styles.barChart}>
-                {monthly
-                  .slice()
-                  .reverse()
-                  .map((m, i) => (
-                    <BarColumn
-                      key={i}
-                      stat={m}
-                      maxRate={100}
-                      accent={t.accent}
-                      t={t}
-                    />
-                  ))}
-              </View>
-            )}
-          </Card>
-        </Animated.View>
-
-        {/* ─── Yearly Stats ──────────────────────── */}
-        <Animated.View entering={FadeInDown.delay(250).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Yearly</Body>
-              <PlatformSymbol
-                ios="chart.line.uptrend.xyaxis"
-                material="show_chart"
-                tintColor={t.textMuted}
-                size={16}
-              />
-            </View>
-            {yearly.length === 0 ? (
-              <EmptyHint t={t} />
-            ) : (
-              <View style={styles.periodList}>
-                {yearly.map((y, i) => (
-                  <PeriodRow
-                    key={i}
-                    stat={y}
-                    color="#A78BFA"
-                    t={t}
-                    isFirst={i === 0}
-                  />
-                ))}
-              </View>
-            )}
-          </Card>
-        </Animated.View>
-
-        {/* ─── Insight: Screen Time vs Discipline ── */}
-        <Animated.View entering={FadeInDown.delay(300).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Screen Time vs Discipline</Body>
-              <PlatformSymbol
-                ios="waveform.path.ecg"
-                material="timeline"
-                tintColor={t.textMuted}
-                size={16}
-              />
-            </View>
-            {screenVsDiscipline.length === 0 ? (
-              <View style={styles.emptyInsight}>
-                <PlatformSymbol
-                  ios="chart.xyaxis.line"
-                  material="insights"
-                  tintColor={t.textMuted}
-                  size={32}
-                />
-                <Caption
-                  variant="footnote"
-                  color={t.textMuted}
-                  style={{ textAlign: "center", marginTop: spacing.sm }}
-                >
-                  Log screen time in your daily metrics to see how it correlates
-                  with your discipline.
-                </Caption>
-              </View>
-            ) : (
-              <>
-                <View style={styles.insightChart}>
-                  {screenVsDiscipline.map((d, i) => {
-                    const maxST = Math.max(
-                      ...screenVsDiscipline.map((x) => x.screenTime),
-                      1,
-                    );
-                    const stH = (d.screenTime / maxST) * 100;
-                    const dcH = d.completionRate;
-                    return (
-                      <View key={i} style={styles.insightBarGroup}>
-                        <View style={styles.insightBars}>
-                          <View
-                            style={[
-                              styles.insightBar,
-                              {
-                                height: `${stH}%`,
-                                backgroundColor: t.danger + "80",
-                              },
-                            ]}
-                          />
-                          <View
-                            style={[
-                              styles.insightBar,
-                              {
-                                height: `${dcH}%`,
-                                backgroundColor: t.accent + "80",
-                              },
-                            ]}
-                          />
-                        </View>
-                        <Caption
-                          variant="caption2"
-                          color={t.textMuted}
-                          style={{ fontSize: 8 }}
-                        >
-                          {d.date.slice(8)}
-                        </Caption>
-                      </View>
-                    );
-                  })}
-                </View>
-                <View style={styles.insightLegend}>
-                  <View style={styles.insightLegendItem}>
-                    <View
-                      style={[styles.legendDot, { backgroundColor: t.danger }]}
-                    />
-                    <Caption variant="caption2" color={t.textMuted}>
-                      Screen Time
-                    </Caption>
-                  </View>
-                  <View style={styles.insightLegendItem}>
-                    <View
-                      style={[styles.legendDot, { backgroundColor: t.accent }]}
-                    />
-                    <Caption variant="caption2" color={t.textMuted}>
-                      Discipline %
-                    </Caption>
-                  </View>
-                </View>
-                <InsightSummary data={screenVsDiscipline} t={t} />
-              </>
-            )}
-          </Card>
-        </Animated.View>
-
-        {/* ─── Insight: Mode Comparison ────────── */}
-        <Animated.View entering={FadeInDown.delay(350).duration(300)}>
-          <Card>
-            <View style={styles.sectionHeader}>
-              <Body variant="headline">Mode Comparison</Body>
-              <PlatformSymbol
-                ios="arrow.left.arrow.right"
-                material="compare_arrows"
-                tintColor={t.textMuted}
-                size={16}
-              />
-            </View>
-            {modeComp.length === 0 ? (
-              <View style={styles.emptyInsight}>
-                <PlatformSymbol
-                  ios="arrow.triangle.swap"
-                  material="swap_horiz"
-                  tintColor={t.textMuted}
-                  size={32}
-                />
-                <Caption
-                  variant="footnote"
-                  color={t.textMuted}
-                  style={{ textAlign: "center", marginTop: spacing.sm }}
-                >
-                  Use both Home and Hostel modes to see how your discipline
-                  compares.
-                </Caption>
-              </View>
-            ) : (
-              <View style={styles.modeCompContainer}>
-                {modeComp.map((mc) => {
-                  const isHome = mc.mode === "home";
-                  const modeColor = isHome ? "#F59E0B" : "#60A5FA";
-                  return (
-                    <View
-                      key={mc.mode}
-                      style={[
-                        styles.modeCard,
-                        { backgroundColor: t.background },
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.modeIconWrap,
-                          { backgroundColor: modeColor + "18" },
-                        ]}
-                      >
-                        <PlatformSymbol
-                          ios={isHome ? "house.fill" : "building.2.fill"}
-                          material={isHome ? "home" : "apartment"}
-                          tintColor={modeColor}
-                          size={20}
-                        />
-                      </View>
-                      <Heading variant="title3" color={modeColor}>
-                        {mc.rate}%
-                      </Heading>
-                      <Caption variant="caption2" color={t.textMuted}>
-                        {isHome ? "Home" : "Hostel"}
-                      </Caption>
-                      <Caption variant="caption2" color={t.textMuted}>
-                        {mc.done}/{mc.total}
-                      </Caption>
-                    </View>
-                  );
-                })}
-                {modeComp.length === 2 && (
-                  <ModeVerdictBadge
-                    home={modeComp.find((m) => m.mode === "home")}
-                    hostel={modeComp.find((m) => m.mode === "hostel")}
-                    t={t}
-                  />
-                )}
-              </View>
-            )}
-          </Card>
-        </Animated.View>
-      </ScrollView>
-    </View>
-  );
-}
-
-// ─── Animated Counter ──────────────────────────────────────────
-
-function AnimatedCounter({ value, color }: { value: number; color: string }) {
-  const display = useSharedValue(0);
-
-  useEffect(() => {
-    display.value = withTiming(value, {
-      duration: 1200,
-      easing: Easing.out(Easing.cubic),
-    });
-  }, [value]);
-
-  const animStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 + Math.sin(display.value * 0.1) * 0.02 }],
-  }));
-
-  return (
-    <Animated.View style={animStyle}>
-      <Heading variant="largeTitle" color={color} style={styles.streakNumber}>
-        {value}
-      </Heading>
-    </Animated.View>
-  );
-}
-
-// ─── Streak Progress Bar ───────────────────────────────────────
-
-function StreakProgressBar({
-  current,
-  goal,
-  color,
-  track,
-}: {
-  current: number;
-  goal: number;
-  color: string;
-  track: string;
-}) {
-  const width = useSharedValue(0);
-
-  useEffect(() => {
-    width.value = withSpring(Math.min(current / goal, 1), {
-      damping: 20,
-      stiffness: 100,
-    });
-  }, [current, goal]);
-
-  const fillStyle = useAnimatedStyle(() => ({
-    width: `${width.value * 100}%`,
-  }));
-
-  return (
-    <View style={[styles.streakBar, { backgroundColor: track }]}>
-      <Animated.View
-        style={[styles.streakFill, { backgroundColor: color }, fillStyle]}
-      />
-    </View>
-  );
-}
-
-// ─── Period Row ────────────────────────────────────────────────
-
-function PeriodRow({
-  stat,
-  color,
-  t,
-  isFirst,
-}: {
-  stat: PeriodStats;
-  color: string;
-  t: ReturnType<typeof useAppTheme>;
-  isFirst: boolean;
-}) {
-  return (
-    <View
-      style={[
-        styles.periodRow,
-        !isFirst && {
-          borderTopWidth: StyleSheet.hairlineWidth,
-          borderTopColor: t.border,
-        },
-      ]}
-    >
-      <View style={styles.periodLeft}>
-        <Body
-          variant="bodyMedium"
-          style={isFirst ? { fontWeight: "700" } : undefined}
-        >
-          {stat.label}
-        </Body>
-        <Caption variant="caption2" color={t.textMuted}>
-          {stat.done}/{stat.total} done
-        </Caption>
-      </View>
-      <View style={styles.periodRight}>
-        <Heading variant="title3" color={color}>
-          {stat.rate}%
-        </Heading>
-        <View style={[styles.miniBar, { backgroundColor: t.background }]}>
-          <View
-            style={[
-              styles.miniFill,
-              { backgroundColor: color, width: `${stat.rate}%` },
-            ]}
-          />
         </View>
+
+        {/* Time Filter Pills */}
+        <TimeRangeFilter selectedRange={timeRange} onSelect={handleRangeChange} />
       </View>
-    </View>
-  );
-}
 
-// ─── Bar Column (monthly chart) ────────────────────────────────
-
-function BarColumn({
-  stat,
-  maxRate,
-  accent,
-  t,
-}: {
-  stat: PeriodStats;
-  maxRate: number;
-  accent: string;
-  t: ReturnType<typeof useAppTheme>;
-}) {
-  const h = maxRate > 0 ? (stat.rate / maxRate) * 100 : 0;
-  return (
-    <View style={styles.barColWrap}>
-      <View style={styles.barColTrack}>
-        <View
-          style={[
-            styles.barColFill,
-            {
-              height: `${Math.max(h, 2)}%`,
-              backgroundColor: accent,
-              opacity: h > 0 ? 0.3 + (h / 100) * 0.7 : 0.15,
-            },
+      {/* ─── Scroll Content ────────────────────────────── */}
+      {loading && !refreshing ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#00F5A0" />
+          <Caption variant="footnote" color="#64748B" style={{ marginTop: spacing.sm }}>
+            Aggregating performance ground truth...
+          </Caption>
+        </View>
+      ) : report ? (
+        <ScrollView
+          ref={scrollRef}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: insets.bottom + spacing["5xl"] + 48 },
           ]}
-        />
-      </View>
-      <Caption
-        variant="caption2"
-        color={t.textMuted}
-        style={{ marginTop: spacing.xs }}
-      >
-        {stat.label}
-      </Caption>
-      <Caption variant="caption2" color={accent} style={{ fontWeight: "700" }}>
-        {stat.rate}%
-      </Caption>
-    </View>
-  );
-}
-
-// ─── Insight Summary ───────────────────────────────────────────
-
-function InsightSummary({
-  data,
-  t,
-}: {
-  data: ScreenTimeDiscipline[];
-  t: ReturnType<typeof useAppTheme>;
-}) {
-  if (data.length < 2) return null;
-
-  const avgST = Math.round(
-    data.reduce((s, d) => s + d.screenTime, 0) / data.length,
-  );
-  const avgDC = Math.round(
-    data.reduce((s, d) => s + d.completionRate, 0) / data.length,
-  );
-
-  let correlation = "neutral";
-  const highST = data.filter((d) => d.screenTime > avgST);
-  const lowST = data.filter((d) => d.screenTime <= avgST);
-  const highSTAvgDC =
-    highST.length > 0
-      ? highST.reduce((s, d) => s + d.completionRate, 0) / highST.length
-      : 0;
-  const lowSTAvgDC =
-    lowST.length > 0
-      ? lowST.reduce((s, d) => s + d.completionRate, 0) / lowST.length
-      : 0;
-
-  if (lowSTAvgDC - highSTAvgDC > 10) correlation = "negative";
-  else if (highSTAvgDC - lowSTAvgDC > 10) correlation = "positive";
-
-  const message =
-    correlation === "negative"
-      ? "Higher screen time correlates with lower discipline. Cut screen time to improve."
-      : correlation === "positive"
-        ? "Surprisingly, higher screen time days show better discipline. Keep monitoring."
-        : "No strong correlation yet. Keep logging data for clearer insights.";
-
-  const icon =
-    correlation === "negative"
-      ? {
-          ios: "exclamationmark.triangle.fill" as const,
-          android: "warning" as const,
-          web: "warning" as const,
-        }
-      : {
-          ios: "info.circle.fill" as const,
-          android: "info" as const,
-          web: "info" as const,
-        };
-
-  const iconColor = correlation === "negative" ? t.warning : "#60A5FA";
-
-  return (
-    <View
-      style={[styles.insightSummary, { backgroundColor: iconColor + "12" }]}
-    >
-      <PlatformSymbol
-        ios={icon.ios}
-        material={icon.android}
-        tintColor={iconColor}
-        size={16}
-      />
-      <Caption variant="footnote" color={t.textSecondary} style={{ flex: 1 }}>
-        {message}
-      </Caption>
-    </View>
-  );
-}
-
-// ─── Mode Verdict ──────────────────────────────────────────────
-
-function ModeVerdictBadge({
-  home,
-  hostel,
-  t,
-}: {
-  home?: ModeComparison;
-  hostel?: ModeComparison;
-  t: ReturnType<typeof useAppTheme>;
-}) {
-  if (!home || !hostel) return null;
-  const diff = home.rate - hostel.rate;
-  const better = diff > 0 ? "Home" : diff < 0 ? "Hostel" : null;
-  const absDiff = Math.abs(diff);
-
-  if (!better || absDiff < 3) {
-    return (
-      <View style={[styles.verdictBadge, { backgroundColor: t.accentMuted }]}>
-        <Caption
-          variant="caption1"
-          color={t.accent}
-          style={{ fontWeight: "600" }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor="#00F5A0"
+              colors={["#00F5A0"]}
+            />
+          }
         >
-          Both modes are roughly equal
-        </Caption>
-      </View>
-    );
-  }
+          {/* 1. Hero Overview Metrics Banner */}
+          <Animated.View entering={FadeIn.duration(350)}>
+            <View style={[styles.heroCard, { backgroundColor: "#0F1626", borderColor: "#1E2A3F" }]}>
+              <View style={styles.heroMetricItem}>
+                <Caption variant="caption2" color="#64748B" style={styles.heroMetricLabel}>
+                  Routine Rate
+                </Caption>
+                <Heading variant="title1" color="#00F5A0" style={styles.heroMetricVal}>
+                  {report.overallCompletionRate}%
+                </Heading>
+                <Caption variant="caption2" color="#94A3B8">
+                  {report.totalDaysTracked} tracked day(s)
+                </Caption>
+              </View>
 
-  const color = better === "Home" ? "#F59E0B" : "#60A5FA";
-  return (
-    <View style={[styles.verdictBadge, { backgroundColor: color + "15" }]}>
-      <Caption variant="caption1" color={color} style={{ fontWeight: "600" }}>
-        {better} mode is {absDiff}% more disciplined
-      </Caption>
+              <View style={styles.heroDivider} />
+
+              <View style={styles.heroMetricItem}>
+                <Caption variant="caption2" color="#64748B" style={styles.heroMetricLabel}>
+                  Active Streak
+                </Caption>
+                <Heading variant="title1" color="#F8FAFC" style={styles.heroMetricVal}>
+                  {report.currentStreak}d
+                </Heading>
+                <Caption variant="caption2" color="#94A3B8">
+                  Best: {report.bestStreak}d
+                </Caption>
+              </View>
+
+              <View style={styles.heroDivider} />
+
+              <View style={styles.heroMetricItem}>
+                <Caption variant="caption2" color="#64748B" style={styles.heroMetricLabel}>
+                  Discipline
+                </Caption>
+                <Heading
+                  variant="title2"
+                  color={report.overallCompletionRate >= 75 ? "#00F5A0" : "#F59E0B"}
+                  style={[styles.heroMetricVal, { marginTop: 4 }]}
+                >
+                  {report.overallCompletionRate >= 80
+                    ? "Master"
+                    : report.overallCompletionRate >= 55
+                      ? "Solid"
+                      : "Building"}
+                </Heading>
+                <Caption variant="caption2" color="#94A3B8">
+                  {timeRange.toUpperCase()} Window
+                </Caption>
+              </View>
+            </View>
+          </Animated.View>
+
+          {/* 2. Main Matrix Card (From Screenshot) */}
+          <Animated.View entering={FadeInDown.delay(100).duration(350)}>
+            <HabitFlowMatrix
+              matrixData={report.matrixData}
+              timeRangeLabel={rangeLabelMap[timeRange]}
+            />
+          </Animated.View>
+
+          {/* 3. Four Glowing Progress Cards Grid (From Screenshot) */}
+          <Animated.View entering={FadeInDown.delay(180).duration(350)} style={styles.glowSection}>
+            <View style={styles.glowCardsRow}>
+              <GlowWaveCard
+                title="Screen Control"
+                badgeLabel="Progress"
+                value={`${avgScreenTime}m avg`}
+                subtitle="Daily digital limit"
+                color="#00F5A0"
+                secondaryColor="#06B6D4"
+                dataPoints={screenPoints}
+              />
+              <GlowWaveCard
+                title="Sleep Duration"
+                badgeLabel="Progress"
+                value={`${avgSleep}h avg`}
+                subtitle="Rest & recovery"
+                color="#8B5CF6"
+                secondaryColor="#A855F7"
+                dataPoints={sleepPoints}
+              />
+            </View>
+
+            <View style={styles.glowCardsRow}>
+              <GlowBarCard
+                title="Daily Steps"
+                badgeLabel="Progress"
+                value={avgSteps > 0 ? `${avgSteps.toLocaleString()}` : "0"}
+                subtitle="Movement & energy"
+                color="#06B6D4"
+                secondaryColor="#8B5CF6"
+                bars={stepBars}
+              />
+              <GlowBarCard
+                title="Deep Work"
+                badgeLabel="Bar"
+                value={`${totalFocus} mins`}
+                subtitle="Focus time output"
+                color="#8B5CF6"
+                secondaryColor="#00F5A0"
+                bars={focusBars}
+                dense
+              />
+            </View>
+          </Animated.View>
+
+          {/* 4. Habit Adoption & Consistency Advisory */}
+          <Animated.View entering={FadeInDown.delay(260).duration(350)}>
+            <HabitAdoptionCard adoptionList={report.habitAdoption} />
+          </Animated.View>
+
+          {/* 5. Strongest & Weakest Days Pattern */}
+          <Animated.View entering={FadeInDown.delay(320).duration(350)}>
+            <DayRankingCard dayStats={report.dayOfWeekRanking} />
+          </Animated.View>
+
+          {/* 6. Mode & Detox Breakdown */}
+          <Animated.View entering={FadeInDown.delay(380).duration(350)}>
+            <ModeDetoxCard stats={report.modeStats} />
+          </Animated.View>
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
-
-// ─── Empty state ───────────────────────────────────────────────
-
-function EmptyHint({ t }: { t: ReturnType<typeof useAppTheme> }) {
-  return (
-    <View style={styles.emptyState}>
-      <Caption color={t.textMuted}>Complete habits to see stats here</Caption>
-    </View>
-  );
-}
-
-// ─── Heatmap Builder ───────────────────────────────────────────
-
-function buildHeatmapColumns(
-  data: { date: string; rate: number }[],
-  accent: string,
-  empty: string,
-): { color: string }[][] {
-  const padded = [...data];
-  if (padded.length > 0) {
-    const firstDow = new Date(padded[0].date + "T00:00:00").getDay();
-    const mondayOffset = firstDow === 0 ? 6 : firstDow - 1;
-    for (let i = 0; i < mondayOffset; i++) {
-      padded.unshift({ date: "", rate: -1 });
-    }
-  }
-
-  const columns: { color: string }[][] = [];
-  let col: { color: string }[] = [];
-
-  for (const cell of padded) {
-    if (col.length === 7) {
-      columns.push(col);
-      col = [];
-    }
-    if (cell.rate < 0) {
-      col.push({ color: "transparent" });
-    } else if (cell.rate === 0) {
-      col.push({ color: empty });
-    } else {
-      const alpha = Math.max(0.2, cell.rate);
-      col.push({
-        color:
-          accent +
-          Math.round(alpha * 255)
-            .toString(16)
-            .padStart(2, "0"),
-      });
-    }
-  }
-  if (col.length > 0) {
-    while (col.length < 7) col.push({ color: "transparent" });
-    columns.push(col);
-  }
-
-  return columns;
-}
-
-function getPeriodColor(index: number): string {
-  const palette = ["#4ADE80", "#34D399", "#60A5FA", "#818CF8"];
-  return palette[index % palette.length];
-}
-
-// ─── Styles ────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   screenHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+    backgroundColor: "#0A0F1D",
+    borderBottomWidth: 1,
+    borderBottomColor: "#172033",
   },
-  content: {
-    padding: spacing.xl,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing["5xl"],
-    gap: spacing.lg,
-  },
-  insightBlock: {
-    paddingLeft: spacing.md,
-    borderLeftWidth: 3,
-    paddingVertical: spacing.xs,
-  },
-
-  // Hero
-  heroCard: {
+  headerLeft: {
+    flexDirection: "row",
     alignItems: "center",
-    paddingVertical: spacing["2xl"],
-    paddingHorizontal: spacing.xl,
-    borderRadius: radius["2xl"],
     gap: spacing.sm,
   },
-  fireGlow: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+  menuBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#111726",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: spacing.xs,
   },
-  streakNumber: {
-    fontSize: 72,
-    lineHeight: 80,
+  content: {
+    padding: spacing.md,
+    gap: spacing.md,
   },
-  heroSubRow: {
+  loadingContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: spacing["3xl"],
+  },
+  heroCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: spacing.lg,
-    marginTop: spacing.xs,
+    justifyContent: "space-around",
+    padding: spacing.md,
+    borderRadius: radius.xl,
+    borderWidth: 1,
   },
-  heroSub: {
-    flexDirection: "row",
+  heroMetricItem: {
     alignItems: "center",
-    gap: spacing.xs,
+    flex: 1,
+  },
+  heroMetricLabel: {
+    textTransform: "uppercase",
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  heroMetricVal: {
+    fontWeight: "800",
+    marginTop: 2,
+    marginBottom: 2,
   },
   heroDivider: {
     width: 1,
-    height: 14,
+    height: 36,
+    backgroundColor: "#1E2A3F",
   },
-  streakBar: {
-    width: "100%",
-    height: 6,
-    borderRadius: 3,
-    marginTop: spacing.md,
-    overflow: "hidden",
-  },
-  streakFill: {
-    height: "100%",
-    borderRadius: 3,
-  },
-
-  // Section header
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: spacing.lg,
-  },
-
-  // Heatmap
-  heatmapDayLabels: {
-    flexDirection: "column",
-    position: "absolute",
-    left: spacing.lg,
-    top: 56,
-    gap: 2,
-    zIndex: 1,
-  },
-  heatmapDayLabel: {
-    height: 16,
-    lineHeight: 16,
-  },
-  heatmapGrid: {
-    flexDirection: "row",
-    gap: 3,
-    paddingLeft: 20,
-  },
-  heatmapCol: {
-    gap: 3,
-  },
-  heatmapCell: {
-    width: 16,
-    height: 16,
-    borderRadius: 3,
-  },
-  heatmapLegend: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    gap: spacing.xs,
-    marginTop: spacing.md,
-  },
-  legendSquare: {
-    width: 12,
-    height: 12,
-    borderRadius: 2,
-  },
-
-  // Period list
-  periodList: {
-    gap: 0,
-  },
-  periodRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: spacing.md,
-  },
-  periodLeft: {
-    flex: 1,
-    gap: spacing.xxs,
-  },
-  periodRight: {
-    alignItems: "flex-end",
-    gap: spacing.xs,
-    width: 80,
-  },
-  miniBar: {
-    width: "100%",
-    height: 4,
-    borderRadius: 2,
-    overflow: "hidden",
-  },
-  miniFill: {
-    height: "100%",
-    borderRadius: 2,
-  },
-
-  // Bar chart (monthly)
-  barChart: {
-    flexDirection: "row",
-    alignItems: "flex-end",
+  glowSection: {
     gap: spacing.sm,
-    height: 140,
   },
-  barColWrap: {
-    flex: 1,
-    alignItems: "center",
-  },
-  barColTrack: {
-    width: "100%",
-    height: 100,
-    justifyContent: "flex-end",
-    borderRadius: radius.sm,
-    overflow: "hidden",
-  },
-  barColFill: {
-    width: "100%",
-    borderRadius: radius.sm,
-  },
-
-  // Insights
-  emptyInsight: {
-    alignItems: "center",
-    paddingVertical: spacing["2xl"],
-  },
-  insightChart: {
+  glowCardsRow: {
     flexDirection: "row",
-    alignItems: "flex-end",
-    height: 100,
-    gap: spacing.xs,
-  },
-  insightBarGroup: {
-    flex: 1,
-    alignItems: "center",
-    gap: spacing.xxs,
-  },
-  insightBars: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    height: 80,
-    gap: 2,
-  },
-  insightBar: {
-    width: 8,
-    borderRadius: 2,
-    minHeight: 2,
-  },
-  insightLegend: {
-    flexDirection: "row",
-    gap: spacing.xl,
-    justifyContent: "center",
-    marginTop: spacing.md,
-  },
-  insightLegendItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.xs,
-  },
-  legendDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  insightSummary: {
-    flexDirection: "row",
-    alignItems: "center",
     gap: spacing.sm,
-    padding: spacing.md,
-    borderRadius: radius.md,
-    marginTop: spacing.md,
-  },
-
-  // Mode comparison
-  modeCompContainer: {
-    gap: spacing.md,
-  },
-  modeCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: spacing.lg,
-    borderRadius: radius.lg,
-    gap: spacing.md,
-  },
-  modeIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.md,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  verdictBadge: {
-    alignItems: "center",
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radius.md,
-  },
-
-  // Empty
-  emptyState: {
-    paddingVertical: spacing.xl,
-    alignItems: "center",
   },
 });

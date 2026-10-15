@@ -3,6 +3,13 @@ import { subscribeAuth } from '@/lib/firebase';
 import { getMode, setMode as persistMode } from '@/lib/firestoreDatabase';
 import type { Mode } from '@/lib/types';
 
+export const STANDARD_MODES: { label: string; value: Mode; icon: string }[] = [
+  { label: 'Home', value: 'home', icon: 'home-outline' },
+  { label: 'Hostel', value: 'hostel', icon: 'business-outline' },
+  { label: 'Office', value: 'office', icon: 'briefcase-outline' },
+  { label: 'Travel', value: 'travel', icon: 'airplane-outline' },
+];
+
 interface ModeContextValue {
   mode: Mode;
   setMode: (m: Mode) => Promise<void>;
